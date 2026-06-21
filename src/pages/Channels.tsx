@@ -8,23 +8,27 @@ export default function Channels() {
   const navigate = useNavigate();
   const { setPlayingChannel } = useAppStore();
   
+  // UI States
   const [channels, setChannels] = useState<any[]>([]);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [activeCategory, setActiveCategory] = useState('All');
-  
-  // Server-Side States
   const [searchQuery, setSearchQuery] = useState('');
-  const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
-
-  // Debounce search so we don't spam the server on every letter typed
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
 
-  // The invisible tripwire for Infinite Scroll
-  const observerTarget = useRef(null);
+  const observerTarget = useRef<HTMLDivElement>(null);
 
-  // 1. Fetch Categories once on load
+  // THE FIX: Bulletproof background engine to prevent runaway loops
+  const engineRefs = useRef({
+    offset: 0,
+    isFetching: false,
+    hasMore: true,
+    category: 'All',
+    search: ''
+  });
+
+  // 1. Fetch Categories on load
   useEffect(() => {
     fetch(`${API_URL}/api/categories`)
       .then(res => res.json())
@@ -34,7 +38,7 @@ export default function Channels() {
       .catch(err => console.error("Failed to load categories", err));
   }, []);
 
-  // 2. Debounce Search Input (Wait 500ms after user stops typing)
+  // 2. Debounce Search Input
   useEffect(() => {
     const handler = setTimeout(() => {
       setDebouncedSearch(searchQuery);
@@ -42,64 +46,78 @@ export default function Channels() {
     return () => clearTimeout(handler);
   }, [searchQuery]);
 
-  // 3. Reset list when Category or Search changes
+  // 3. Keep background engine synced with UI
   useEffect(() => {
-    setChannels([]);
-    setOffset(0);
-    setHasMore(true);
+    engineRefs.current.category = activeCategory;
+    engineRefs.current.search = debouncedSearch;
   }, [activeCategory, debouncedSearch]);
 
-  // 4. Fetch Channels from Server
-  const fetchChannels = useCallback(async () => {
-    if (isLoading || !hasMore) return;
+  // 4. The Core Fetching Engine (Completely detached from renders)
+  const loadMoreChannels = useCallback(async (reset = false) => {
+    const engine = engineRefs.current;
+
+    // Guard clauses to stop the runaway train
+    if (engine.isFetching) return;
+    if (!reset && !engine.hasMore) return;
+
+    engine.isFetching = true;
     setIsLoading(true);
 
     try {
+      if (reset) engine.offset = 0;
+
       const url = new URL(`${window.location.origin}${API_URL}/api/channels`);
       url.searchParams.append('limit', '100');
-      url.searchParams.append('offset', offset.toString());
+      url.searchParams.append('offset', engine.offset.toString());
       
-      if (activeCategory !== 'All') {
-        url.searchParams.append('category', activeCategory);
+      if (engine.category !== 'All') {
+        url.searchParams.append('category', engine.category);
       }
-      if (debouncedSearch.trim() !== '') {
-        url.searchParams.append('search', debouncedSearch.trim());
+      if (engine.search.trim() !== '') {
+        url.searchParams.append('search', engine.search.trim());
       }
 
       const response = await fetch(url.toString());
       const data = await response.json();
 
-      setChannels(prev => [...prev, ...data.data]);
-      setHasMore(data.hasMore);
-      setOffset(prev => prev + 100);
+      setChannels(prev => reset ? data.data : [...prev, ...data.data]);
+      
+      engine.hasMore = data.hasMore;
+      setHasMore(data.hasMore); // Update UI text
+      engine.offset += 100;
+
     } catch (error) {
       console.error("Failed to fetch channels", error);
     } finally {
+      engine.isFetching = false;
       setIsLoading(false);
     }
-  }, [offset, hasMore, isLoading, activeCategory, debouncedSearch]);
+  }, []);
 
-  // 5. Infinite Scroll Tripwire Logic
+  // 5. Trigger reset when category or search changes
+  useEffect(() => {
+    setChannels([]); // Clear UI immediately
+    loadMoreChannels(true);
+  }, [activeCategory, debouncedSearch, loadMoreChannels]);
+
+  // 6. The Stable Tripwire
   useEffect(() => {
     const observer = new IntersectionObserver(
-      entries => {
-        if (entries[0].isIntersecting && hasMore && !isLoading) {
-          fetchChannels();
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          loadMoreChannels(false);
         }
       },
-      { threshold: 0.1 }
+      // Trigger fetch when the user is 200px away from the bottom for smoother scrolling
+      { rootMargin: '200px' } 
     );
 
     if (observerTarget.current) {
       observer.observe(observerTarget.current);
     }
 
-    return () => {
-      if (observerTarget.current) {
-        observer.unobserve(observerTarget.current);
-      }
-    };
-  }, [observerTarget, fetchChannels, hasMore, isLoading]);
+    return () => observer.disconnect();
+  }, [loadMoreChannels]);
 
   const handlePlay = (channel: any) => {
     setPlayingChannel(channel.stream_url, channel.name, channel.logo_url);
