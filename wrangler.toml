@@ -1,4 +1,4 @@
-name = "iptv-backend"
+name = "iptv-hub"
 main = "worker.js"
 compatibility_date = "2024-06-21"
 
