@@ -253,7 +253,24 @@ export default {
         return Response.json({ success: true }, { headers: corsHeaders });
       }
 
-      return Response.json({ status: "API Live - Advanced Multi-Source Routing Enabled" }, { headers: corsHeaders });
+      // ==========================================
+      // FULL-STACK FRONTEND ROUTING
+      // ==========================================
+      // If the URL does not start with /api/, serve the React App!
+      if (!url.pathname.startsWith("/api/")) {
+        try {
+          const assetResponse = await env.ASSETS.fetch(request);
+          // If the file exists (like an image or JS file), serve it
+          if (assetResponse.status !== 404) return assetResponse;
+          
+          // React Router SPA Fallback: Serve index.html for unknown pages (like /channels)
+          return env.ASSETS.fetch(new Request(url.origin + "/", request));
+        } catch (e) {
+          return new Response("Frontend not found", { status: 404 });
+        }
+      }
+
+      return Response.json({ status: "API Live - Full Stack Routing Enabled" }, { headers: corsHeaders });
     } catch (error) {
       // THE FIX: Strict, detailed error mapping passed back to the frontend
       return Response.json({ error: error.message, stack: error.stack }, { status: 500, headers: corsHeaders });
