@@ -1,0 +1,151 @@
+import { useState, useEffect } from 'react';
+import { Settings as SettingsIcon, Save, MonitorPlay, RefreshCw, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { API_URL } from '../config';
+
+interface AppSettings {
+  default_quality: string;
+  auto_refresh_interval: string;
+}
+
+export default function Settings() {
+  const [settings, setSettings] = useState<AppSettings>({
+    default_quality: 'auto',
+    auto_refresh_interval: 'never'
+  });
+  
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<{ type: 'success' | 'error' | null, message: string }>({ type: null, message: '' });
+
+  useEffect(() => {
+    const fetchSettings = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/settings`);
+        const data = await res.json();
+        if (data && !data.error) {
+          setSettings({
+            default_quality: data.default_quality || 'auto',
+            auto_refresh_interval: data.auto_refresh_interval || 'never'
+          });
+        }
+      } catch (error) {
+        console.error("Failed to load settings", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchSettings();
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setStatus({ type: null, message: '' });
+
+    try {
+      const res = await fetch(`${API_URL}/api/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+
+      if (!res.ok) throw new Error("Failed to save settings");
+
+      setStatus({ type: 'success', message: 'Settings saved successfully!' });
+      setTimeout(() => setStatus({ type: null, message: '' }), 3000);
+    } catch (error) {
+      setStatus({ type: 'error', message: 'Failed to save settings to the database.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center justify-center h-full"><Loader2 className="animate-spin text-blue-500" size={40} /></div>;
+  }
+
+  return (
+    <div className="p-4 md:p-6 max-w-3xl mx-auto h-full overflow-y-auto custom-scrollbar pb-32">
+      <div className="flex items-center gap-3 mb-8">
+        <SettingsIcon className="text-blue-500" size={28} />
+        <h2 className="text-2xl font-bold text-slate-100 tracking-wide">Application Settings</h2>
+      </div>
+
+      <div className="space-y-6">
+        
+        {/* Playback Settings Card */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 md:p-6 shadow-sm">
+          <div className="flex items-center gap-2 mb-4 border-b border-slate-800 pb-3">
+            <MonitorPlay className="text-slate-400" size={20} />
+            <h3 className="text-lg font-semibold text-slate-200">Playback Preferences</h3>
+          </div>
+          
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-slate-400">Default Video Quality</label>
+            <p className="text-xs text-slate-500 mb-3">
+              Forces the player to use a specific stream quality if the channel provides multiple options.
+            </p>
+            <select 
+              value={settings.default_quality}
+              onChange={(e) => setSettings({ ...settings, default_quality: e.target.value })}
+              className="w-full md:w-1/2 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer appearance-none"
+            >
+              <option value="auto">Auto (Adaptive Bitrate - Recommended)</option>
+              <option value="high">High Quality (Max Resolution)</option>
+              <option value="low">Low Quality (Data Saver)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Data & Sync Settings Card */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 md:p-6 shadow-sm">
+          <div className="flex items-center gap-2 mb-4 border-b border-slate-800 pb-3">
+            <RefreshCw className="text-slate-400" size={20} />
+            <h3 className="text-lg font-semibold text-slate-200">Data & Synchronization</h3>
+          </div>
+          
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-slate-400">Auto-Refresh Sources</label>
+            <p className="text-xs text-slate-500 mb-3">
+              The server will automatically fetch the latest channel links in the background.
+            </p>
+            <select 
+              value={settings.auto_refresh_interval}
+              onChange={(e) => setSettings({ ...settings, auto_refresh_interval: e.target.value })}
+              className="w-full md:w-1/2 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer appearance-none"
+            >
+              <option value="never">Never (Manual Refresh Only)</option>
+              <option value="daily">Daily</option>
+              <option value="3days">Every 3 Days</option>
+              <option value="weekly">Weekly</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Action Bar */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-8 pt-4">
+          <div className="flex-1">
+            {status.type && (
+              <div className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium border animate-in fade-in ${
+                status.type === 'success' ? 'bg-green-900/20 text-green-400 border-green-900/50' : 'bg-red-900/20 text-red-400 border-red-900/50'
+              }`}>
+                {status.type === 'success' ? <CheckCircle size={18} /> : <AlertCircle size={18} />}
+                {status.message}
+              </div>
+            )}
+          </div>
+
+          <button 
+            onClick={handleSave}
+            disabled={saving}
+            className="w-full sm:w-auto px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/50 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20"
+          >
+            {saving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+            {saving ? 'Saving...' : 'Save Settings'}
+          </button>
+        </div>
+
+      </div>
+    </div>
+  );
+}

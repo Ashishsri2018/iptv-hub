@@ -1,0 +1,413 @@
+import { useEffect, useRef, useState } from 'react';
+import Hls from 'hls.js';
+import { API_URL } from '../config';
+import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink } from 'lucide-react';
+import { useAppStore } from '../store';
+
+interface VideoPlayerProps {
+  streamUrl: string;
+}
+
+export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
+  const { channelName } = useAppStore();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
+
+  const [isBuffering, setIsBuffering] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const [volume, setVolume] = useState(1);
+  const [isMuted, setIsMuted] = useState(false);
+  
+  // THE NEW STRICT ERROR STATE
+  const [hasFatalError, setHasFatalError] = useState(false);
+  const [exactErrorMsg, setExactErrorMsg] = useState("");
+  
+  const [progress, setProgress] = useState(0);
+  const [currentTimeDisplay, setCurrentTimeDisplay] = useState("00:00");
+  const [durationDisplay, setDurationDisplay] = useState("00:00");
+  const [isLive, setIsLive] = useState(true);
+  
+  const [showControls, setShowControls] = useState(true);
+  const [showQualityMenu, setShowQualityMenu] = useState(false);
+  const hideControlsTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [levels, setLevels] = useState<Hls.Level[]>([]);
+  const [currentLevel, setCurrentLevel] = useState<number>(-1);
+
+  const formatTime = (seconds: number) => {
+    if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "00:00";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        try { (window.screen.orientation as any).unlock(); } catch (err) {}
+      }
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    setHasFatalError(false);
+    setExactErrorMsg("");
+    
+    if (containerRef.current) {
+      containerRef.current.style.opacity = '1';
+      containerRef.current.style.display = '';
+    }
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
+    const handleLeavePip = () => {
+      setTimeout(() => {
+        if (videoRef.current && videoRef.current.paused) {
+          if (containerRef.current) {
+            containerRef.current.style.opacity = '0';
+            containerRef.current.style.display = 'none';
+          }
+          window.dispatchEvent(new CustomEvent('force-close-player'));
+        } else {
+          window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
+        }
+      }, 100);
+    };
+
+    video.addEventListener('enterpictureinpicture', handleEnterPip);
+    video.addEventListener('leavepictureinpicture', handleLeavePip);
+
+    const initializePlayer = async () => {
+      let defaultQuality = 'auto';
+      try {
+        const res = await fetch(`${API_URL}/api/settings`);
+        if (res.ok) {
+          const data = await res.json();
+          defaultQuality = data.default_quality || 'auto';
+        }
+      } catch (e: any) { 
+        console.error("Settings Fetch Error:", e); 
+      }
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({ maxMaxBufferLength: 30 });
+        hlsRef.current = hls;
+
+        hls.loadSource(streamUrl);
+        hls.attachMedia(video);
+
+        hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+          setLevels(data.levels);
+          let targetLevel = -1; 
+          if (data.levels.length > 1) {
+            if (defaultQuality === 'high') targetLevel = data.levels.length - 1;
+            else if (defaultQuality === 'low') targetLevel = 0;
+          }
+          hls.currentLevel = targetLevel;
+          setCurrentLevel(targetLevel);
+          setIsBuffering(false);
+          video.play().catch(e => {
+            console.error("Autoplay Error:", e);
+            setIsPlaying(false);
+          });
+        });
+
+        // THE UPGRADED STRICT ERROR LISTENER
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal) {
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              setExactErrorMsg(`Network Error: ${data.details}. The server refused the connection or CORS is blocking it.`);
+              setHasFatalError(true);
+              setIsBuffering(false);
+            }
+            else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              console.warn("Media error, attempting recovery...");
+              hls.recoverMediaError();
+            }
+            else {
+              setExactErrorMsg(`Playback Error: ${data.details}`);
+              setHasFatalError(true);
+              setIsBuffering(false);
+              hls.destroy();
+            }
+          }
+        });
+      } 
+      else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = streamUrl;
+        video.addEventListener('loadedmetadata', () => {
+          setIsBuffering(false);
+          video.play().catch(() => setIsPlaying(false));
+        });
+        video.addEventListener('error', (e) => {
+          setExactErrorMsg("Native Browser Error: The media format is unsupported or the connection was rejected.");
+          setHasFatalError(true);
+          setIsBuffering(false);
+        });
+      }
+    };
+
+    initializePlayer();
+    startControlHideTimer();
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.stopLoad(); 
+        hlsRef.current.detachMedia();
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      video.removeEventListener('enterpictureinpicture', handleEnterPip);
+      video.removeEventListener('leavepictureinpicture', handleLeavePip);
+      if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
+      video.pause();
+      video.src = ""; 
+      video.load(); 
+    };
+  }, [streamUrl]);
+
+  const togglePlay = () => {
+    if (hasFatalError) return;
+    if (videoRef.current?.paused) {
+      videoRef.current.play();
+      setIsPlaying(true);
+    } else {
+      videoRef.current?.pause();
+      setIsPlaying(false);
+    }
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setVolume(val);
+    if (videoRef.current) videoRef.current.volume = val;
+    setIsMuted(val === 0);
+  };
+
+  const toggleMute = () => {
+    if (videoRef.current) {
+      videoRef.current.muted = !isMuted;
+      setIsMuted(!isMuted);
+      if (isMuted && volume === 0) setVolume(0.5); 
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    if (!videoRef.current) return;
+    const duration = videoRef.current.duration;
+    const currentTime = videoRef.current.currentTime;
+
+    if (duration && isFinite(duration)) {
+      if (isLive) setIsLive(false);
+      setProgress((currentTime / duration) * 100);
+      setCurrentTimeDisplay(formatTime(currentTime));
+      setDurationDisplay(formatTime(duration));
+    } else {
+      if (!isLive) setIsLive(true);
+      setProgress(100); 
+    }
+  };
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!videoRef.current) return;
+    const duration = videoRef.current.duration;
+    if (!duration || !isFinite(duration)) return; 
+    
+    const bounds = e.currentTarget.getBoundingClientRect();
+    const percent = (e.clientX - bounds.left) / bounds.width;
+    videoRef.current.currentTime = percent * duration;
+  };
+
+  const toggleFullScreen = async () => {
+    if (!document.fullscreenElement) {
+      try {
+        await containerRef.current?.requestFullscreen();
+        try { await (window.screen.orientation as any).lock('landscape'); } catch (err) {}
+      } catch (e: any) { 
+        console.warn("Fullscreen Error:", e); 
+      }
+    } else {
+      document.exitFullscreen().catch();
+    }
+  };
+
+  const togglePiP = () => {
+    if (document.pictureInPictureElement) document.exitPictureInPicture();
+    else videoRef.current?.requestPictureInPicture();
+  };
+
+  const changeQuality = (levelIndex: number) => {
+    if (hlsRef.current) {
+      hlsRef.current.currentLevel = levelIndex;
+      setCurrentLevel(levelIndex);
+      setShowQualityMenu(false);
+    }
+  };
+
+  const startControlHideTimer = () => {
+    if (hasFatalError) return;
+    setShowControls(true);
+    if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
+    hideControlsTimeout.current = setTimeout(() => {
+      if (!showQualityMenu) setShowControls(false); 
+    }, 3000);
+  };
+
+  const handleContainerTap = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).tagName.toLowerCase() === 'video') {
+      setShowControls(prev => !prev);
+      if (!showControls) startControlHideTimer();
+    } else {
+      startControlHideTimer();
+    }
+  };
+
+  // THE UPGRADED OS INTENT ENGINE FOR ERROR FALLBACK
+  const launchExternalPlayer = () => {
+    try {
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      let targetUrl = streamUrl;
+
+      if (isAndroid) {
+        const match = streamUrl.match(/^([a-zA-Z0-9]+):\/\/(.*)$/);
+        if (match) {
+          const scheme = match[1];
+          const path = match[2];
+          targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(channelName)};end;`;
+        } else {
+          console.warn("URL match failed, using fallback.");
+        }
+      } else {
+        targetUrl = `vlc://${streamUrl}`;
+      }
+      
+      const a = document.createElement('a');
+      a.href = targetUrl;
+      a.target = '_top';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (error: any) {
+      console.error("External Player Launch Error:", error);
+      alert(`Could not launch external player: ${error.message}`);
+    }
+  };
+
+  return (
+    <div 
+      ref={containerRef}
+      className="relative w-full h-full bg-black group transition-opacity duration-200"
+      onMouseMove={startControlHideTimer}
+      onClick={handleContainerTap}
+      onMouseLeave={() => { if (!showQualityMenu && !hasFatalError) setShowControls(false); }}
+    >
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        className={`w-full h-full object-contain ${hasFatalError ? 'hidden' : ''}`}
+        onTimeUpdate={handleTimeUpdate}
+        onWaiting={() => setIsBuffering(true)}
+        onPlaying={() => setIsBuffering(false)}
+      />
+
+      {isBuffering && !hasFatalError && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+          <Loader2 size={48} className="animate-spin text-blue-500 drop-shadow-lg" />
+        </div>
+      )}
+
+      {/* DETAILED ERROR FALLBACK UI */}
+      {hasFatalError && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-slate-900/90 text-center p-6 animate-in fade-in duration-300">
+          <AlertTriangle size={56} className="text-yellow-500 mb-4 drop-shadow-lg" />
+          <h3 className="text-2xl font-bold text-white mb-2 tracking-wide">Stream Blocked</h3>
+          <p className="text-slate-300 mb-2 max-w-sm text-sm sm:text-base">
+            Your browser's security settings (CORS) are blocking this stream. However, you can still play it natively using an external app like VLC.
+          </p>
+          <div className="bg-black/50 border border-red-900/50 rounded p-3 mb-8 w-full max-w-md">
+            <p className="text-red-400 font-mono text-xs break-all text-left">{exactErrorMsg}</p>
+          </div>
+          <button 
+            onClick={launchExternalPlayer} 
+            className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-colors shadow-xl"
+          >
+            <ExternalLink size={20} /> Open in External Player
+          </button>
+        </div>
+      )}
+
+      {/* Control Bar */}
+      {!hasFatalError && (
+        <div className={`absolute bottom-0 left-0 w-full bg-gradient-to-t from-black via-black/80 to-transparent transition-opacity duration-300 px-4 pb-4 pt-16 z-20 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+          <div className="w-full h-2 bg-slate-700/50 rounded-full mb-4 cursor-pointer relative group/seek" onClick={handleSeek}>
+            <div className="h-full rounded-full transition-all bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" style={{ width: `${progress}%` }} />
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4 sm:gap-6">
+              <button onClick={togglePlay} className="text-white hover:text-blue-400 transition-colors">
+                {isPlaying ? <Pause size={24} className="fill-current" /> : <Play size={24} className="fill-current" />}
+              </button>
+
+              <div className="flex items-center gap-2 group/volume">
+                <button onClick={toggleMute} className="text-white hover:text-blue-400 transition-colors">
+                  {isMuted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
+                </button>
+                <input 
+                  type="range" min="0" max="1" step="0.05" value={isMuted ? 0 : volume} onChange={handleVolumeChange}
+                  className="w-0 sm:w-20 opacity-0 sm:opacity-100 group-hover/volume:w-20 group-hover/volume:opacity-100 transition-all accent-blue-500 h-1 cursor-pointer"
+                />
+              </div>
+
+              {isLive ? (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-red-600/20 border border-red-600/50 select-none">
+                  <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                  <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Live</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 text-sm font-medium text-slate-300 font-mono tracking-tight select-none">
+                  <span>{currentTimeDisplay}</span><span className="text-slate-500">/</span><span>{durationDisplay}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-4 sm:gap-5 relative">
+              {levels.length > 0 && (
+                <div className="relative">
+                  <button onClick={(e) => { e.stopPropagation(); setShowQualityMenu(!showQualityMenu); }} className={`transition-colors ${showQualityMenu ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
+                    <Settings2 size={20} />
+                  </button>
+                  
+                  {showQualityMenu && (
+                    <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
+                      <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Quality</span></div>
+                      <button onClick={() => changeQuality(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
+                        Auto {currentLevel === -1 && <Check size={14} className="text-blue-400" />}
+                      </button>
+                      {levels.map((level, idx) => (
+                        <button key={idx} onClick={() => changeQuality(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
+                          {level.height ? `${level.height}p` : `Level ${idx + 1}`} {currentLevel === idx && <Check size={14} className="text-blue-400" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button onClick={togglePiP} className="text-white hover:text-blue-400 transition-colors"><PictureInPicture size={20} /></button>
+              <button onClick={toggleFullScreen} className="text-white hover:text-blue-400 transition-colors"><Maximize size={20} /></button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
