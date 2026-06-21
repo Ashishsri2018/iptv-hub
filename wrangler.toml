@@ -1,0 +1,8 @@
+name = "iptv-backend"
+main = "worker.js"
+compatibility_date = "2024-06-21"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "iptv-db"
+database_id = "8d70d727-dc14-46c3-abad-4d38fc0e018f"
