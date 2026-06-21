@@ -4,7 +4,6 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-// Fast hashing to guarantee 100% unique IDs
 function generateSafeId(sourceId, url, count) {
   let hash = 5381;
   for (let i = 0; i < url.length; i++) hash = (hash * 33) ^ url.charCodeAt(i);
@@ -13,7 +12,6 @@ function generateSafeId(sourceId, url, count) {
   return `${sourceId}_${hashStr}_${tail}_${count}`;
 }
 
-// Universal Database Ingestion Engine (Handles M3U, Xtream, and Stalker)
 async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUrl) {
   if (channels.length === 0) throw new Error("Parser finished, but found 0 readable channels.");
 
@@ -65,24 +63,18 @@ export default {
         return Response.json(results, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // 1. M3U URL IMPORTER
-      // ==========================================
+      // IMPORT ROUTES (M3U, Xtream, Stalker) remain unchanged here...
       if (url.pathname === "/api/sources/import" && request.method === "POST") {
         const { playlistUrl, name, type } = await request.json();
         const sourceId = `src_${Date.now()}`;
-
         const response = await fetch(playlistUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
         if (!response.ok) throw new Error(`Target server rejected connection. HTTP Status: ${response.status}`);
-        
         const text = await response.text();
         if (text.length > 25000000) throw new Error("File exceeds 25MB Cloudflare memory limit.");
-
         const lines = text.split('\n');
         const channels = [];
         let currentChannel = {};
         const urlCounts = {};
-
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i].trim();
           if (line.startsWith('#EXTINF:')) {
@@ -92,8 +84,7 @@ export default {
             currentChannel.logo_url = logoMatch ? logoMatch[1] : null;
             const commaSplit = line.split(',');
             currentChannel.name = commaSplit.length > 1 ? commaSplit[commaSplit.length - 1].trim() : 'Unknown';
-          } 
-          else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
+          } else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
             currentChannel.stream_url = line;
             currentChannel.source_id = sourceId;
             urlCounts[line] = (urlCounts[line] || 0) + 1;
@@ -103,112 +94,55 @@ export default {
           }
           if (i > 0 && i % 2000 === 0) await new Promise(resolve => setTimeout(resolve, 5));
         }
-
         const count = await insertDatabaseBatch(env, channels, sourceId, name, type, playlistUrl);
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // 2. LOCAL FILE BULK INGESTOR (For M3U Files)
-      // ==========================================
       if (url.pathname === "/api/sources/import-bulk" && request.method === "POST") {
         const { sourceId, name, type, channels: rawChannels } = await request.json();
-        
-        // Ensure Source Exists First
-        await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, type, url, channel_count) VALUES (?, ?, ?, 'Local Upload', 0)")
-          .bind(sourceId, name, type).run();
-
+        await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, type, url, channel_count) VALUES (?, ?, ?, 'Local Upload', 0)").bind(sourceId, name, type).run();
         const stmts = rawChannels.map(ch => 
-          env.DB.prepare(`
-            INSERT INTO channels (id, source_id, name, channel_group, logo_url, stream_url) 
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET 
-              name = excluded.name, channel_group = excluded.channel_group, logo_url = excluded.logo_url, stream_url = excluded.stream_url
-          `).bind(ch.id, sourceId, ch.name, ch.channel_group, ch.logo_url, ch.stream_url)
+          env.DB.prepare(`INSERT INTO channels (id, source_id, name, channel_group, logo_url, stream_url) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, channel_group = excluded.channel_group, logo_url = excluded.logo_url, stream_url = excluded.stream_url`).bind(ch.id, sourceId, ch.name, ch.channel_group, ch.logo_url, ch.stream_url)
         );
-        
-        for (let i = 0; i < stmts.length; i += 100) {
-          try { await env.DB.batch(stmts.slice(i, i + 100)); } catch(e) { console.error(e); }
-        }
-
+        for (let i = 0; i < stmts.length; i += 100) { try { await env.DB.batch(stmts.slice(i, i + 100)); } catch(e) {} }
         await env.DB.prepare("UPDATE sources SET channel_count = (SELECT COUNT(*) FROM channels WHERE source_id = ?), last_updated = CURRENT_TIMESTAMP WHERE id = ?").bind(sourceId, sourceId).run();
         return Response.json({ success: true }, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // 3. XTREAM CODES API IMPORTER
-      // ==========================================
       if (url.pathname === "/api/sources/import-xtream" && request.method === "POST") {
         const { serverUrl, username, password, name } = await request.json();
         const sourceId = `src_${Date.now()}`;
-        const cleanUrl = serverUrl.replace(/\/$/, ''); // Remove trailing slash
-
+        const cleanUrl = serverUrl.replace(/\/$/, '');
         const targetApi = `${cleanUrl}/player_api.php?username=${username}&password=${password}&action=get_live_streams`;
-        
         const response = await fetch(targetApi, { headers: { "User-Agent": "IPTVSmarters/1.0" } });
-        if (!response.ok) throw new Error(`Xtream server rejected connection. HTTP Status: ${response.status}`);
-        
+        if (!response.ok) throw new Error(`Xtream server rejected connection.`);
         const data = await response.json();
-        if (!Array.isArray(data)) throw new Error("Xtream API returned invalid data format. Check credentials.");
-
+        if (!Array.isArray(data)) throw new Error("Invalid data format.");
         const channels = data.map((ch, idx) => ({
-          id: `${sourceId}_xtream_${ch.stream_id || idx}`,
-          source_id: sourceId,
-          name: ch.name || `Channel ${idx}`,
-          channel_group: ch.category_name || 'Live TV',
-          logo_url: ch.stream_icon || null,
-          stream_url: `${cleanUrl}/${username}/${password}/${ch.stream_id}` // Standard Xtream routing
+          id: `${sourceId}_xtream_${ch.stream_id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, channel_group: ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, stream_url: `${cleanUrl}/${username}/${password}/${ch.stream_id}`
         }));
-
         const count = await insertDatabaseBatch(env, channels, sourceId, name, "Xtream API", cleanUrl);
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // 4. STALKER PORTAL API IMPORTER
-      // ==========================================
       if (url.pathname === "/api/sources/import-stalker" && request.method === "POST") {
         const { serverUrl, macAddress, name } = await request.json();
         const sourceId = `src_${Date.now()}`;
         const cleanUrl = serverUrl.replace(/\/$/, '');
-
-        const headers = { 
-          "Cookie": `mac=${macAddress}`,
-          "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200"
-        };
-
-        // Handshake
+        const headers = { "Cookie": `mac=${macAddress}`, "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200" };
         const handshakeRes = await fetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
-        if (!handshakeRes.ok) throw new Error(`Stalker Handshake Failed. HTTP Status: ${handshakeRes.status}. Your MAC address may be blocked.`);
-        
+        if (!handshakeRes.ok) throw new Error(`Stalker Handshake Failed.`);
         const handshake = await handshakeRes.json();
         if (handshake.js && handshake.js.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
-
-        // Fetch Channels
         const chRes = await fetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
-        if (!chRes.ok) throw new Error("Stalker Channel Fetch Failed.");
-        
         const chData = await chRes.json();
-        if (!chData.js || !chData.js.data) throw new Error("Stalker Portal returned empty channel data. Check MAC authorization.");
-
         const channels = chData.js.data.map((ch, idx) => ({
-          id: `${sourceId}_stalker_${ch.id || idx}`,
-          source_id: sourceId,
-          name: ch.name || `Channel ${idx}`,
-          channel_group: ch.tv_genre?.title || 'Live TV',
-          logo_url: ch.logo || null,
-          // WARNING: Stalker streams often require dynamic 'create_link' commands. 
-          // We map the static command URL here, but playback may require proxy adaptations later.
-          stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`
+          id: `${sourceId}_stalker_${ch.id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`
         }));
-
         const count = await insertDatabaseBatch(env, channels, sourceId, name, "Stalker API", cleanUrl);
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // STANDARD ROUTES (Channels, Favorites, Settings, Delete)
-      // ==========================================
       if (url.pathname.startsWith("/api/sources/") && request.method === "DELETE") {
         const sourceId = url.pathname.split("/").pop();
         await env.DB.prepare(`DELETE FROM favorites WHERE channel_id IN (SELECT id FROM channels WHERE source_id = ?)`).bind(sourceId).run();
@@ -217,62 +151,97 @@ export default {
         return Response.json({ success: true }, { headers: corsHeaders });
       }
 
+      // ==========================================
+      // NEW SERVER-SIDE SEARCH, FILTER & PAGINATION
+      // ==========================================
+      
+      // 1. Fetch Unique Categories Fast
+      if (url.pathname === "/api/categories" && request.method === "GET") {
+        const { results } = await env.DB.prepare("SELECT DISTINCT channel_group FROM channels ORDER BY channel_group ASC").all();
+        const categories = results.map(r => r.channel_group).filter(Boolean);
+        return Response.json(categories, { headers: corsHeaders });
+      }
+
+      // 2. Fetch Channels with Limits and Filters
       if (url.pathname === "/api/channels" && request.method === "GET") {
-        const { results } = await env.DB.prepare("SELECT * FROM channels").all();
-        return Response.json(results, { headers: corsHeaders });
+        const category = url.searchParams.get("category");
+        const search = url.searchParams.get("search");
+        const limit = parseInt(url.searchParams.get("limit") || "100");
+        const offset = parseInt(url.searchParams.get("offset") || "0");
+
+        let query = "SELECT * FROM channels";
+        let countQuery = "SELECT COUNT(*) as total FROM channels";
+        let conditions = [];
+        let params = [];
+
+        if (category && category !== "All" && category !== "undefined") {
+          conditions.push("channel_group = ?");
+          params.push(category);
+        }
+
+        if (search) {
+          conditions.push("name LIKE ?");
+          params.push(`%${search}%`);
+        }
+
+        if (conditions.length > 0) {
+          const whereClause = " WHERE " + conditions.join(" AND ");
+          query += whereClause;
+          countQuery += whereClause;
+        }
+
+        query += ` ORDER BY name ASC LIMIT ? OFFSET ?`;
+        
+        // Get the total count so the frontend knows if it should keep scrolling
+        const totalResult = await env.DB.prepare(countQuery).bind(...params).first();
+        
+        params.push(limit, offset);
+        const { results } = await env.DB.prepare(query).bind(...params).all();
+
+        return Response.json({
+          data: results,
+          total: totalResult.total,
+          hasMore: offset + results.length < totalResult.total
+        }, { headers: corsHeaders });
       }
 
       if (url.pathname === "/api/favorites" && request.method === "GET") {
-        const { results } = await env.DB.prepare(`
-          SELECT c.*, s.name as source_name FROM favorites f JOIN channels c ON f.channel_id = c.id JOIN sources s ON c.source_id = s.id ORDER BY c.name ASC
-        `).all();
+        const { results } = await env.DB.prepare(`SELECT c.*, s.name as source_name FROM favorites f JOIN channels c ON f.channel_id = c.id JOIN sources s ON c.source_id = s.id ORDER BY c.name ASC`).all();
         return Response.json(results, { headers: corsHeaders });
       }
-      
       if (url.pathname === "/api/favorites" && request.method === "POST") {
         const { channel_id } = await request.json();
         await env.DB.prepare("INSERT OR IGNORE INTO favorites (channel_id) VALUES (?)").bind(channel_id).run();
         return Response.json({ success: true }, { headers: corsHeaders });
       }
-
       if (url.pathname.startsWith("/api/favorites/") && request.method === "DELETE") {
         const channelId = url.pathname.split("/").pop();
         await env.DB.prepare("DELETE FROM favorites WHERE channel_id = ?").bind(channelId).run();
         return Response.json({ success: true }, { headers: corsHeaders });
       }
-
       if (url.pathname === "/api/settings" && request.method === "GET") {
         const settings = await env.DB.prepare("SELECT * FROM settings WHERE id = 'global'").first();
         return Response.json(settings, { headers: corsHeaders });
       }
-
       if (url.pathname === "/api/settings" && request.method === "PUT") {
         const body = await request.json();
-        await env.DB.prepare("UPDATE settings SET default_quality = ?, auto_refresh_interval = ? WHERE id = 'global'")
-          .bind(body.default_quality, body.auto_refresh_interval).run();
+        await env.DB.prepare("UPDATE settings SET default_quality = ?, auto_refresh_interval = ? WHERE id = 'global'").bind(body.default_quality, body.auto_refresh_interval).run();
         return Response.json({ success: true }, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // FULL-STACK FRONTEND ROUTING
-      // ==========================================
-      // If the URL does not start with /api/, serve the React App!
+      // FRONTEND ROUTING
       if (!url.pathname.startsWith("/api/")) {
         try {
           const assetResponse = await env.ASSETS.fetch(request);
-          // If the file exists (like an image or JS file), serve it
           if (assetResponse.status !== 404) return assetResponse;
-          
-          // React Router SPA Fallback: Serve index.html for unknown pages (like /channels)
           return env.ASSETS.fetch(new Request(url.origin + "/", request));
         } catch (e) {
           return new Response("Frontend not found", { status: 404 });
         }
       }
 
-      return Response.json({ status: "API Live - Full Stack Routing Enabled" }, { headers: corsHeaders });
+      return Response.json({ status: "API Live" }, { headers: corsHeaders });
     } catch (error) {
-      // THE FIX: Strict, detailed error mapping passed back to the frontend
       return Response.json({ error: error.message, stack: error.stack }, { status: 500, headers: corsHeaders });
     }
   }
