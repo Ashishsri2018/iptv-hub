@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown, Star, ExternalLink, AlertCircle, X } from 'lucide-react';
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
-import { useNavigate } from 'react-router-dom';
 
 export default function Channels() {
   const { setPlayingChannel } = useAppStore();
@@ -25,7 +24,6 @@ export default function Channels() {
   const [isLongPress, setIsLongPress] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   
-  // THE FIX: Use standard number for browser window.setTimeout
   const pressTimer = useRef<number | null>(null);
 
   const engineRefs = useRef({
@@ -37,7 +35,6 @@ export default function Channels() {
     search: ''
   });
 
-  // Helper to safely extract error messages
   const handleError = (context: string, err: any) => {
     console.error(context, err);
     setErrorMessage(`${context}: ${err?.message || 'Unknown error occurred'}`);
@@ -111,7 +108,7 @@ export default function Channels() {
 
     engine.isFetching = true;
     setIsLoading(true);
-    setErrorMessage(null); // Clear previous errors on new fetch
+    setErrorMessage(null); 
 
     try {
       if (reset) engine.offset = 0;
@@ -171,7 +168,6 @@ export default function Channels() {
 
   const handleTouchStart = (url: string) => {
     setIsLongPress(false);
-    // Use window.setTimeout explicitly for browser-native typing
     pressTimer.current = window.setTimeout(() => {
       navigator.clipboard.writeText(url).then(() => {
         setIsLongPress(true);
@@ -205,7 +201,6 @@ export default function Channels() {
       });
       if (!response.ok) throw new Error("Database rejected favorite sync");
     } catch (error) {
-      // Revert UI if server fails
       setFavorites(prev => {
         const revert = new Set(prev);
         isFav ? revert.add(channel.id) : revert.delete(channel.id);
