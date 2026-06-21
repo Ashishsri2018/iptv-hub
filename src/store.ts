@@ -19,6 +19,7 @@ export interface Source {
 
 interface AppState {
   // Player State
+  setPlayingChannel: (url: string, name: string, logo: string | null) => void;
   streamUrl: string | null;
   channelName: string | null;
   playChannel: (url: string, name: string) => void;
@@ -51,6 +52,7 @@ const generateDummyChannels = (): Channel[] => {
 };
 
 export const useAppStore = create<AppState>((set) => ({
+  setPlayingChannel: (url, name, logo) => set({ streamUrl: url, channelName: name, logoUrl: logo }),
   streamUrl: null,
   channelName: null,
   playChannel: (url, name) => set({ streamUrl: url, channelName: name }),
