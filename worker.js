@@ -149,7 +149,7 @@ export default {
         return Response.json({ categories: results, total }, { headers: corsHeaders });
       }
 
-      // 2. Fetch Channels (With Global Search OR Playlist Filtering)
+      // 2. Fetch Channels (With Contextual Search & Filtering)
       if (url.pathname === "/api/channels" && request.method === "GET") {
         const sourceId = url.searchParams.get("sourceId");
         const category = url.searchParams.get("category");
@@ -162,21 +162,22 @@ export default {
         let conditions = [];
         let params = [];
 
-        // If user is searching, ignore the Playlist tabs and search everything globally
+        // ALWAYS apply Source (Playlist) filter if provided
+        if (sourceId && sourceId !== "All") {
+          conditions.push("source_id = ?");
+          params.push(sourceId);
+        }
+        
+        // ALWAYS apply Category filter if provided
+        if (category && category !== "All" && category !== "undefined") {
+          conditions.push("channel_group = ?");
+          params.push(category);
+        }
+
+        // ALWAYS apply Search filter if provided
         if (search && search.trim() !== "") {
           conditions.push("name LIKE ?");
           params.push(`%${search}%`);
-        } else {
-          // Otherwise, filter by the specific Playlist Tab
-          if (sourceId && sourceId !== "All") {
-            conditions.push("source_id = ?");
-            params.push(sourceId);
-          }
-          // And filter by the specific Category Tab
-          if (category && category !== "All" && category !== "undefined") {
-            conditions.push("channel_group = ?");
-            params.push(category);
-          }
         }
 
         if (conditions.length > 0) {
