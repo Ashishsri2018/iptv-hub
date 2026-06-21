@@ -47,7 +47,7 @@ export default function Channels() {
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => {
       setToastMessage(null);
-    }, 3000); // Disappears after 3 seconds
+    }, 3000); 
   };
 
   // 1. Fetch Sources & Favorites on initial load
@@ -182,7 +182,7 @@ export default function Channels() {
       navigator.clipboard.writeText(url).then(() => {
         setIsLongPress(true);
         if (navigator.vibrate) navigator.vibrate(50); 
-        showToast('Stream link copied to clipboard'); // <-- NEW TOAST BANNER
+        showToast('Stream link copied to clipboard');
       }).catch(err => {
         handleError("Failed to copy link", err);
       });
@@ -220,10 +220,30 @@ export default function Channels() {
     }
   };
 
+  // ==========================================
+  // THE ULTIMATE ANDROID INTENT FIX
+  // ==========================================
   const openExternal = (e: React.MouseEvent, url: string) => {
     e.stopPropagation();
-    // THE FIX: Open in the same window so Android can intercept the intent directly
-    window.location.href = url;
+    
+    // Check if the user is on an Android device
+    const isAndroid = /Android/i.test(navigator.userAgent);
+    
+    if (isAndroid) {
+      // Strip the http:// or https:// from the URL
+      const isHttps = url.startsWith('https://');
+      const cleanUrl = url.replace(/^https?:\/\//, '');
+      const scheme = isHttps ? 'https' : 'http';
+      
+      // Construct an explicit Android Intent URI that asks for a video player
+      const intentUrl = `intent://${cleanUrl}#Intent;action=android.intent.action.VIEW;scheme=${scheme};type=video/*;end;`;
+      
+      // Force the browser to hand the link over to the Android OS
+      window.location.href = intentUrl;
+    } else {
+      // Fallback for PC/Mac/iOS
+      window.open(url, '_blank');
+    }
   };
 
   const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'this playlist';
