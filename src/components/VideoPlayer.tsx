@@ -19,7 +19,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   
-  // THE NEW STRICT ERROR STATE
   const [hasFatalError, setHasFatalError] = useState(false);
   const [exactErrorMsg, setExactErrorMsg] = useState("");
   
@@ -32,7 +31,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const hideControlsTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const [levels, setLevels] = useState<Hls.Level[]>([]);
+  // THE FIX: Changed from Hls.Level[] to any[] to satisfy TypeScript strict mode
+  const [levels, setLevels] = useState<any[]>([]);
   const [currentLevel, setCurrentLevel] = useState<number>(-1);
 
   const formatTime = (seconds: number) => {
@@ -103,7 +103,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
 
-        hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+        // THE FIX: Replaced unused 'event' parameter with '_'
+        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
           setLevels(data.levels);
           let targetLevel = -1; 
           if (data.levels.length > 1) {
@@ -119,8 +120,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           });
         });
 
-        // THE UPGRADED STRICT ERROR LISTENER
-        hls.on(Hls.Events.ERROR, (event, data) => {
+        // THE FIX: Replaced unused 'event' parameter with '_'
+        hls.on(Hls.Events.ERROR, (_, data) => {
           if (data.fatal) {
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               setExactErrorMsg(`Network Error: ${data.details}. The server refused the connection or CORS is blocking it.`);
@@ -146,7 +147,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           setIsBuffering(false);
           video.play().catch(() => setIsPlaying(false));
         });
-        video.addEventListener('error', (e) => {
+        // THE FIX: Removed unused 'e' parameter
+        video.addEventListener('error', () => {
           setExactErrorMsg("Native Browser Error: The media format is unsupported or the connection was rejected.");
           setHasFatalError(true);
           setIsBuffering(false);
@@ -269,7 +271,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     }
   };
 
-  // THE UPGRADED OS INTENT ENGINE FOR ERROR FALLBACK
   const launchExternalPlayer = () => {
     try {
       const isAndroid = /Android/i.test(navigator.userAgent);
@@ -280,7 +281,9 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         if (match) {
           const scheme = match[1];
           const path = match[2];
-          targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(channelName)};end;`;
+          // THE FIX: Added fallback generic string if channelName is null
+          const safeName = channelName || 'Live Channel';
+          targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(safeName)};end;`;
         } else {
           console.warn("URL match failed, using fallback.");
         }

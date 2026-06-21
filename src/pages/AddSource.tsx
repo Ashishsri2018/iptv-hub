@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Link, Upload, Server, Tv2, Loader2, CheckCircle, AlertCircle, AlertTriangle } from 'lucide-react';
+import { Link, Upload, Server, Tv2, Loader2, CheckCircle, AlertTriangle } from 'lucide-react';
 import { API_URL } from '../config';
 
 type Tab = 'm3u-url' | 'm3u-file' | 'xtream' | 'stalker';
