@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder } from 'lucide-react';
+import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown } from 'lucide-react';
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
 import { useNavigate } from 'react-router-dom';
@@ -10,7 +10,8 @@ export default function Channels() {
   
   // UI Data States
   const [sources, setSources] = useState<any[]>([]);
-  const [categories, setCategories] = useState<string[]>(['All']);
+  // Update category state to hold objects with counts
+  const [categories, setCategories] = useState<{name: string, count: number}[]>([{name: 'All', count: 0}]);
   const [channels, setChannels] = useState<any[]>([]);
   
   // Selection States
@@ -40,21 +41,21 @@ export default function Channels() {
       .then(data => {
         if (Array.isArray(data)) {
           setSources(data);
-          if (data.length > 0) setActiveSourceId(data[0].id); // Auto-select first playlist
+          if (data.length > 0) setActiveSourceId(data[0].id);
         }
       })
       .catch(err => console.error("Failed to load sources", err));
   }, []);
 
-  // 2. Fetch Categories whenever the active Playlist changes
+  // 2. Fetch Categories with counts whenever the active Playlist changes
   useEffect(() => {
     if (activeSourceId) {
       fetch(`${API_URL}/api/categories?sourceId=${activeSourceId}`)
         .then(res => res.json())
         .then(data => {
-          if (Array.isArray(data)) {
-            setCategories(['All', ...data]);
-            setActiveCategory('All'); // Reset category to 'All' when swapping playlists
+          if (data && Array.isArray(data.categories)) {
+            setCategories([{ name: 'All', count: data.total }, ...data.categories]);
+            setActiveCategory('All');
           }
         })
         .catch(err => console.error("Failed to load categories", err));
@@ -100,7 +101,6 @@ export default function Channels() {
       const response = await fetch(url.toString());
       const data = await response.json();
 
-      // Safe fallback logic just in case
       if (Array.isArray(data)) {
         let filtered = data;
         if (engine.sourceId !== 'All') filtered = filtered.filter(c => c.source_id === engine.sourceId);
@@ -161,11 +161,11 @@ export default function Channels() {
         </div>
       </div>
 
-      {/* DOUBLE NAVIGATION BARS (Hidden during Global Search) */}
+      {/* NAVIGATION BARS (Hidden during Global Search) */}
       {!isSearching && (
         <div className="mb-4">
           {/* Main Tabs: Playlists (Sources) */}
-          <div className="flex overflow-x-auto pb-3 gap-2 custom-scrollbar shrink-0 border-b border-slate-800/50 mb-3">
+          <div className="flex overflow-x-auto pb-3 gap-2 custom-scrollbar shrink-0 border-b border-slate-800/50 mb-4">
             {sources.length > 1 && (
               <button
                 onClick={() => setActiveSourceId('All')}
@@ -193,21 +193,22 @@ export default function Channels() {
             ))}
           </div>
 
-          {/* Sub-Tabs: Categories inside the active Playlist */}
-          <div className="flex overflow-x-auto pb-4 gap-2 custom-scrollbar shrink-0">
-            {categories.map((cat) => (
-              <button
-                key={cat}
-                onClick={() => setActiveCategory(cat)}
-                className={`whitespace-nowrap px-4 py-1.5 rounded-full text-sm font-medium transition-colors border
-                  ${activeCategory === cat 
-                    ? 'bg-blue-500/20 border-blue-500/50 text-blue-400' 
-                    : 'bg-slate-900 border-slate-700/50 text-slate-400 hover:text-slate-300'
-                  }`}
-              >
-                {cat}
-              </button>
-            ))}
+          {/* Sub-Tabs: Category Dropdown */}
+          <div className="relative mb-5 w-full sm:w-72">
+            <select
+              value={activeCategory}
+              onChange={(e) => setActiveCategory(e.target.value)}
+              className="w-full appearance-none bg-slate-800 border border-slate-700 text-slate-200 px-4 py-2.5 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-medium cursor-pointer shadow-lg"
+            >
+              {categories.map((cat) => (
+                <option key={cat.name} value={cat.name} className="bg-slate-900 text-slate-200">
+                  {cat.name} ({cat.count})
+                </option>
+              ))}
+            </select>
+            <div className="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-slate-400">
+              <ChevronDown size={18} />
+            </div>
           </div>
         </div>
       )}

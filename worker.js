@@ -129,10 +129,10 @@ export default {
       // PLAYLIST (SOURCE) AWARE SEARCH & PAGINATION
       // ==========================================
       
-      // 1. Get Categories for a Specific Playlist
+      // 1. Get Categories and their Channel Counts for a Specific Playlist
       if (url.pathname === "/api/categories" && request.method === "GET") {
         const sourceId = url.searchParams.get("sourceId");
-        let query = "SELECT DISTINCT channel_group FROM channels";
+        let query = "SELECT channel_group as name, COUNT(*) as count FROM channels";
         let params = [];
         
         if (sourceId && sourceId !== "All") {
@@ -140,10 +140,13 @@ export default {
           params.push(sourceId);
         }
         
-        query += " ORDER BY channel_group ASC";
+        query += " GROUP BY channel_group ORDER BY channel_group ASC";
         const { results } = await env.DB.prepare(query).bind(...params).all();
-        const categories = results.map(r => r.channel_group).filter(Boolean);
-        return Response.json(categories, { headers: corsHeaders });
+        
+        // Calculate the total channels for the "All" fallback
+        const total = results.reduce((sum, row) => sum + row.count, 0);
+        
+        return Response.json({ categories: results, total }, { headers: corsHeaders });
       }
 
       // 2. Fetch Channels (With Global Search OR Playlist Filtering)
