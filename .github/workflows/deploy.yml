@@ -1,4 +1,4 @@
-name: Deploy to Cloudflare
+name: Deploy Full-Stack App
 
 on:
   push:
@@ -6,28 +6,21 @@ on:
       - main
 
 jobs:
-  deploy-backend:
+  deploy:
     runs-on: ubuntu-latest
-    name: Deploy Worker API
+    name: Build & Deploy to Cloudflare
     steps:
-      - uses: actions/checkout@v4
-      - name: Deploy Worker Natively
-        run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-  deploy-frontend:
-    runs-on: ubuntu-latest
-    name: Deploy React App
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
+      - name: Install Dependencies
         run: npm install
-      - name: Build React App
+
+      - name: Build React App (Generates /dist)
         run: npm run build
-      - name: Deploy Pages Natively
-        run: npx wrangler pages deploy dist --project-name iptv-hub
+
+      - name: Deploy Full-Stack Worker
+        run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
