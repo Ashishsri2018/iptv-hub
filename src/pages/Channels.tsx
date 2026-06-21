@@ -8,7 +8,6 @@ export default function Channels() {
   const navigate = useNavigate();
   const { setPlayingChannel } = useAppStore();
   
-  // UI States
   const [channels, setChannels] = useState<any[]>([]);
   const [categories, setCategories] = useState<string[]>(['All']);
   const [activeCategory, setActiveCategory] = useState('All');
@@ -17,7 +16,6 @@ export default function Channels() {
   const [isLoading, setIsLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
 
-  // Background engine to track pagination without triggering accidental renders
   const engineRefs = useRef({
     offset: 0,
     isFetching: false,
@@ -26,17 +24,15 @@ export default function Channels() {
     search: ''
   });
 
-  // 1. Fetch Categories on load
   useEffect(() => {
     fetch(`${API_URL}/api/categories`)
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) setCategories(['All', ...data]);
       })
-      .catch(err => console.error("Failed to load categories", err));
+      .catch(err => console.error("Categories missing, using default", err));
   }, []);
 
-  // 2. Debounce Search Input
   useEffect(() => {
     const handler = setTimeout(() => {
       setDebouncedSearch(searchQuery);
@@ -44,13 +40,11 @@ export default function Channels() {
     return () => clearTimeout(handler);
   }, [searchQuery]);
 
-  // 3. Keep background engine synced with UI
   useEffect(() => {
     engineRefs.current.category = activeCategory;
     engineRefs.current.search = debouncedSearch;
   }, [activeCategory, debouncedSearch]);
 
-  // 4. The Core Fetching Engine
   const loadMoreChannels = useCallback(async (reset = false) => {
     const engine = engineRefs.current;
 
@@ -63,25 +57,46 @@ export default function Channels() {
     try {
       if (reset) engine.offset = 0;
 
-      const url = new URL(`${window.location.origin}${API_URL}/api/channels`);
+      const url = new URL('/api/channels', window.location.origin);
       url.searchParams.append('limit', '100');
       url.searchParams.append('offset', engine.offset.toString());
-      
-      if (engine.category !== 'All') {
-        url.searchParams.append('category', engine.category);
-      }
-      if (engine.search.trim() !== '') {
-        url.searchParams.append('search', engine.search.trim());
-      }
+      if (engine.category !== 'All') url.searchParams.append('category', engine.category);
+      if (engine.search.trim() !== '') url.searchParams.append('search', engine.search.trim());
 
       const response = await fetch(url.toString());
       const data = await response.json();
 
-      setChannels(prev => reset ? data.data : [...prev, ...data.data]);
-      
-      engine.hasMore = data.hasMore;
-      setHasMore(data.hasMore);
-      engine.offset += 100;
+      // ==============================================================
+      // THE BULLETPROOF SHIELD (Auto-Detects Backend Version)
+      // ==============================================================
+      if (Array.isArray(data)) {
+        // SCENARIO A: The backend is still stuck on the old code!
+        // It threw 25,000 channels at us. We will filter and slice it locally.
+        let filtered = data;
+        
+        if (engine.category !== 'All') {
+          filtered = filtered.filter(c => c.channel_group === engine.category);
+        }
+        if (engine.search.trim() !== '') {
+          const s = engine.search.toLowerCase();
+          filtered = filtered.filter(c => c.name?.toLowerCase().includes(s));
+        }
+
+        const chunk = filtered.slice(engine.offset, engine.offset + 100);
+        setChannels(prev => reset ? chunk : [...prev, ...chunk]);
+        
+        engine.hasMore = engine.offset + 100 < filtered.length;
+        setHasMore(engine.hasMore);
+        engine.offset += 100;
+
+      } else {
+        // SCENARIO B: The backend successfully updated to the new code!
+        // We use the lightning-fast server data.
+        setChannels(prev => reset ? data.data : [...prev, ...data.data]);
+        engine.hasMore = data.hasMore;
+        setHasMore(data.hasMore);
+        engine.offset += 100;
+      }
 
     } catch (error) {
       console.error("Failed to fetch channels", error);
@@ -91,7 +106,6 @@ export default function Channels() {
     }
   }, []);
 
-  // 5. Trigger reset when category or search changes
   useEffect(() => {
     setChannels([]); 
     loadMoreChannels(true);
@@ -112,15 +126,14 @@ export default function Channels() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
           <input
             type="text"
-            placeholder="Search channels on server..."
+            placeholder="Search channels..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-slate-900 border border-slate-700 rounded-full pl-10 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
+            className="w-full bg-slate-900 border border-slate-700 rounded-full pl-10 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-all"
           />
         </div>
       </div>
 
-      {/* Category Pills */}
       <div className="flex overflow-x-auto pb-4 mb-2 gap-2 custom-scrollbar shrink-0">
         {categories.map((cat) => (
           <button
@@ -128,7 +141,7 @@ export default function Channels() {
             onClick={() => setActiveCategory(cat)}
             className={`whitespace-nowrap px-4 py-1.5 rounded-full text-sm font-medium transition-colors border
               ${activeCategory === cat 
-                ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/20' 
+                ? 'bg-blue-600 border-blue-500 text-white shadow-lg' 
                 : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
               }`}
           >
@@ -137,7 +150,6 @@ export default function Channels() {
         ))}
       </div>
 
-      {/* Channel Grid */}
       <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 pb-24">
         {channels.length === 0 && !isLoading ? (
           <div className="flex flex-col items-center justify-center h-64 text-slate-500">
@@ -150,7 +162,7 @@ export default function Channels() {
               <div 
                 key={`${channel.id}-${index}`} 
                 onClick={() => handlePlay(channel)}
-                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-blue-500/50 hover:shadow-[0_0_15px_rgba(59,130,246,0.15)] transition-all cursor-pointer group flex flex-col"
+                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-blue-500/50 transition-all cursor-pointer group flex flex-col"
               >
                 <div className="aspect-video bg-slate-950 relative flex items-center justify-center p-4">
                   {channel.logo_url ? (
@@ -188,7 +200,6 @@ export default function Channels() {
           </div>
         )}
 
-        {/* MANUAL LOAD MORE BUTTON */}
         {hasMore && channels.length > 0 && (
           <div className="w-full py-8 flex justify-center">
             <button
@@ -205,12 +216,6 @@ export default function Channels() {
                 'Load More Channels'
               )}
             </button>
-          </div>
-        )}
-
-        {!hasMore && channels.length > 0 && (
-          <div className="w-full py-8 flex justify-center">
-            <span className="text-slate-600 text-sm font-medium">End of list</span>
           </div>
         )}
       </div>
