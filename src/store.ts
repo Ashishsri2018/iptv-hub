@@ -22,6 +22,7 @@ interface AppState {
   setPlayingChannel: (url: string, name: string, logo: string | null) => void;
   streamUrl: string | null;
   channelName: string | null;
+  logoUrl: string | null; // <-- Added this so TypeScript knows it exists!
   playChannel: (url: string, name: string) => void;
   closePlayer: () => void;
 
@@ -55,8 +56,9 @@ export const useAppStore = create<AppState>((set) => ({
   setPlayingChannel: (url, name, logo) => set({ streamUrl: url, channelName: name, logoUrl: logo }),
   streamUrl: null,
   channelName: null,
+  logoUrl: null, // <-- Initialized it here
   playChannel: (url, name) => set({ streamUrl: url, channelName: name }),
-  closePlayer: () => set({ streamUrl: null, channelName: null }),
+  closePlayer: () => set({ streamUrl: null, channelName: null, logoUrl: null }), // <-- Clear it on close
 
   channels: generateDummyChannels(),
   sources: [
