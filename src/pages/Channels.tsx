@@ -1,17 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown } from 'lucide-react';
+import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown, Star, ExternalLink } from 'lucide-react';
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
-import { useNavigate } from 'react-router-dom';
 
 export default function Channels() {
-  const navigate = useNavigate();
   const { setPlayingChannel } = useAppStore();
   
   // UI Data States
   const [sources, setSources] = useState<any[]>([]);
   const [categories, setCategories] = useState<{name: string, count: number}[]>([{name: 'All', count: 0}]);
   const [channels, setChannels] = useState<any[]>([]);
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
   
   // Selection States
   const [activeSourceId, setActiveSourceId] = useState('All');
@@ -19,11 +18,12 @@ export default function Channels() {
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   
-  // Pagination States
+  // Pagination & Touch States
   const [isLoading, setIsLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [isLongPress, setIsLongPress] = useState(false);
+  const pressTimer = useRef<NodeJS.Timeout | null>(null);
 
-  // Background Tracker
   const engineRefs = useRef({
     offset: 0,
     isFetching: false,
@@ -33,7 +33,7 @@ export default function Channels() {
     search: ''
   });
 
-  // 1. Fetch Playlists (Sources) on initial load
+  // 1. Fetch Sources & Favorites on initial load
   useEffect(() => {
     fetch(`${API_URL}/api/sources`)
       .then(res => res.json())
@@ -44,9 +44,19 @@ export default function Channels() {
         }
       })
       .catch(err => console.error("Failed to load sources", err));
+
+    // Fetch user's favorited channels from database
+    fetch(`${API_URL}/api/favorites`)
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data)) {
+          setFavorites(new Set(data.map(f => f.id || f.channel_id)));
+        }
+      })
+      .catch(err => console.error("Failed to load favorites", err));
   }, []);
 
-  // 2. Fetch Categories with counts whenever the active Playlist changes
+  // 2. Fetch Categories
   useEffect(() => {
     if (activeSourceId) {
       fetch(`${API_URL}/api/categories?sourceId=${activeSourceId}`)
@@ -69,17 +79,15 @@ export default function Channels() {
     return () => clearTimeout(handler);
   }, [searchQuery]);
 
-  // 4. Keep engine synced
   useEffect(() => {
     engineRefs.current.sourceId = activeSourceId;
     engineRefs.current.category = activeCategory;
     engineRefs.current.search = debouncedSearch;
   }, [activeSourceId, activeCategory, debouncedSearch]);
 
-  // 5. Core Fetching Engine
+  // 4. Fetch Channels
   const loadMoreChannels = useCallback(async (reset = false) => {
     const engine = engineRefs.current;
-
     if (engine.isFetching) return;
     if (!reset && !engine.hasMore) return;
 
@@ -88,11 +96,9 @@ export default function Channels() {
 
     try {
       if (reset) engine.offset = 0;
-
       const url = new URL('/api/channels', window.location.origin);
       url.searchParams.append('limit', '100');
       url.searchParams.append('offset', engine.offset.toString());
-      
       if (engine.sourceId !== 'All') url.searchParams.append('sourceId', engine.sourceId);
       if (engine.category !== 'All') url.searchParams.append('category', engine.category);
       if (engine.search.trim() !== '') url.searchParams.append('search', engine.search.trim());
@@ -118,7 +124,6 @@ export default function Channels() {
         setHasMore(data.hasMore);
       }
       engine.offset += 100;
-
     } catch (error) {
       console.error("Failed to fetch channels", error);
     } finally {
@@ -127,21 +132,71 @@ export default function Channels() {
     }
   }, []);
 
-  // 6. Trigger channel reload when selections change
   useEffect(() => {
     setChannels([]); 
     loadMoreChannels(true);
   }, [activeSourceId, activeCategory, debouncedSearch, loadMoreChannels]);
 
-  const handlePlay = (channel: any) => {
+  // ==========================================
+  // CARD ACTIONS (Play, Favorite, Copy, External)
+  // ==========================================
+  const handleCardClick = (e: React.MouseEvent, channel: any) => {
+    if (isLongPress) {
+      e.preventDefault();
+      return; // Prevent video from playing if they were just copying the link
+    }
+    // Removed navigate('/') to prevent kicking user back to favorites page
     setPlayingChannel(channel.stream_url, channel.name, channel.logo_url);
-    navigate('/');
   };
 
-  // Determine the name of the active playlist for the search placeholder
-  const activeSourceName = activeSourceId === 'All' 
-    ? 'all playlists' 
-    : sources.find(s => s.id === activeSourceId)?.name || 'this playlist';
+  const handleTouchStart = (url: string) => {
+    setIsLongPress(false);
+    pressTimer.current = setTimeout(() => {
+      navigator.clipboard.writeText(url).then(() => {
+        setIsLongPress(true);
+        if (navigator.vibrate) navigator.vibrate(50); // Small haptic feedback
+        alert('Copied stream link to clipboard!');
+      });
+    }, 2000);
+  };
+
+  const handleTouchEnd = () => {
+    if (pressTimer.current) clearTimeout(pressTimer.current);
+  };
+
+  const toggleFavorite = async (e: React.MouseEvent, channel: any) => {
+    e.stopPropagation(); // Stop card click
+    const isFav = favorites.has(channel.id);
+    
+    // Optimistic UI update
+    setFavorites(prev => {
+      const next = new Set(prev);
+      isFav ? next.delete(channel.id) : next.add(channel.id);
+      return next;
+    });
+
+    try {
+      if (isFav) {
+        await fetch(`${API_URL}/api/favorites/${encodeURIComponent(channel.id)}`, { method: 'DELETE' });
+      } else {
+        await fetch(`${API_URL}/api/favorites`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel_id: channel.id })
+        });
+      }
+    } catch (error) {
+      console.error("Failed to sync favorite with database", error);
+    }
+  };
+
+  const openExternal = (e: React.MouseEvent, url: string) => {
+    e.stopPropagation(); // Stop card click
+    window.open(url, '_blank');
+  };
+
+  const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'this playlist';
+  const isSearching = debouncedSearch.trim() !== '';
 
   return (
     <div className="h-full flex flex-col max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -163,18 +218,14 @@ export default function Channels() {
         </div>
       </div>
 
-      {/* NAVIGATION BARS (Now permanently visible) */}
+      {/* NAVIGATION BARS */}
       <div className="mb-4">
-        {/* Main Tabs: Playlists (Sources) */}
         <div className="flex overflow-x-auto pb-3 gap-2 custom-scrollbar shrink-0 border-b border-slate-800/50 mb-4">
           {sources.length > 1 && (
             <button
               onClick={() => setActiveSourceId('All')}
               className={`whitespace-nowrap px-5 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
-                ${activeSourceId === 'All' 
-                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' 
-                  : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
+                ${activeSourceId === 'All' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
             >
               <Folder size={16} /> All Playlists
             </button>
@@ -184,17 +235,13 @@ export default function Channels() {
               key={src.id}
               onClick={() => setActiveSourceId(src.id)}
               className={`whitespace-nowrap px-5 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
-                ${activeSourceId === src.id 
-                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' 
-                  : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
+                ${activeSourceId === src.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
             >
               <Folder size={16} /> {src.name}
             </button>
           ))}
         </div>
 
-        {/* Sub-Tabs: Category Dropdown */}
         <div className="relative mb-5 w-full sm:w-72">
           <select
             value={activeCategory}
@@ -213,6 +260,12 @@ export default function Channels() {
         </div>
       </div>
 
+      {isSearching && (
+        <div className="mb-6 text-sm text-blue-400 font-medium">
+          Showing results for "{debouncedSearch}"...
+        </div>
+      )}
+
       {/* CHANNEL GRID */}
       <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 pb-24">
         {channels.length === 0 && !isLoading ? (
@@ -225,15 +278,40 @@ export default function Channels() {
             {channels.map((channel, index) => (
               <div 
                 key={`${channel.id}-${index}`} 
-                onClick={() => handlePlay(channel)}
-                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-blue-500/50 transition-all cursor-pointer group flex flex-col"
+                onClick={(e) => handleCardClick(e, channel)}
+                onTouchStart={() => handleTouchStart(channel.stream_url)}
+                onTouchEnd={handleTouchEnd}
+                onTouchMove={handleTouchEnd}
+                onMouseDown={() => handleTouchStart(channel.stream_url)}
+                onMouseUp={handleTouchEnd}
+                onMouseLeave={handleTouchEnd}
+                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-blue-500/50 transition-all cursor-pointer group flex flex-col relative select-none"
               >
+                {/* ACTION ICONS (Favorites & External) */}
+                <div className="absolute top-2 right-2 z-10 flex gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                  <button
+                    onClick={(e) => openExternal(e, channel.stream_url)}
+                    className="p-1.5 bg-black/60 hover:bg-black/80 rounded-lg text-slate-200 hover:text-white backdrop-blur-sm transition-colors"
+                  >
+                    <ExternalLink size={16} />
+                  </button>
+                  <button
+                    onClick={(e) => toggleFavorite(e, channel)}
+                    className="p-1.5 bg-black/60 hover:bg-black/80 rounded-lg backdrop-blur-sm transition-colors"
+                  >
+                    <Star 
+                      size={16} 
+                      className={favorites.has(channel.id) ? "fill-yellow-400 text-yellow-400" : "text-slate-200 hover:text-white"} 
+                    />
+                  </button>
+                </div>
+
                 <div className="aspect-video bg-slate-950 relative flex items-center justify-center p-4">
                   {channel.logo_url ? (
                     <img 
                       src={channel.logo_url} 
                       alt={channel.name} 
-                      className="max-h-full max-w-full object-contain drop-shadow-lg group-hover:scale-110 transition-transform duration-300"
+                      className="max-h-full max-w-full object-contain drop-shadow-lg group-hover:scale-110 transition-transform duration-300 pointer-events-none"
                       onError={(e) => {
                         (e.target as HTMLImageElement).style.display = 'none';
                         (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
@@ -264,7 +342,6 @@ export default function Channels() {
           </div>
         )}
 
-        {/* LOAD MORE BUTTON */}
         {hasMore && channels.length > 0 && (
           <div className="w-full py-8 flex justify-center">
             <button
