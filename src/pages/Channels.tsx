@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown, Star, ExternalLink } from 'lucide-react';
+import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown, Star, ExternalLink, AlertCircle, X } from 'lucide-react';
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
+import { useNavigate } from 'react-router-dom';
 
 export default function Channels() {
   const { setPlayingChannel } = useAppStore();
@@ -18,11 +19,14 @@ export default function Channels() {
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   
-  // Pagination & Touch States
+  // Pagination, Touch & Error States
   const [isLoading, setIsLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [isLongPress, setIsLongPress] = useState(false);
-  const pressTimer = useRef<NodeJS.Timeout | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  
+  // THE FIX: Use standard number for browser window.setTimeout
+  const pressTimer = useRef<number | null>(null);
 
   const engineRefs = useRef({
     offset: 0,
@@ -33,41 +37,55 @@ export default function Channels() {
     search: ''
   });
 
+  // Helper to safely extract error messages
+  const handleError = (context: string, err: any) => {
+    console.error(context, err);
+    setErrorMessage(`${context}: ${err?.message || 'Unknown error occurred'}`);
+  };
+
   // 1. Fetch Sources & Favorites on initial load
   useEffect(() => {
     fetch(`${API_URL}/api/sources`)
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+        return res.json();
+      })
       .then(data => {
         if (Array.isArray(data)) {
           setSources(data);
           if (data.length > 0) setActiveSourceId(data[0].id);
         }
       })
-      .catch(err => console.error("Failed to load sources", err));
+      .catch(err => handleError("Failed to load playlists", err));
 
-    // Fetch user's favorited channels from database
     fetch(`${API_URL}/api/favorites`)
-      .then(res => res.json())
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+        return res.json();
+      })
       .then(data => {
         if (Array.isArray(data)) {
           setFavorites(new Set(data.map(f => f.id || f.channel_id)));
         }
       })
-      .catch(err => console.error("Failed to load favorites", err));
+      .catch(err => handleError("Failed to load favorites", err));
   }, []);
 
   // 2. Fetch Categories
   useEffect(() => {
     if (activeSourceId) {
       fetch(`${API_URL}/api/categories?sourceId=${activeSourceId}`)
-        .then(res => res.json())
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+          return res.json();
+        })
         .then(data => {
           if (data && Array.isArray(data.categories)) {
             setCategories([{ name: 'All', count: data.total }, ...data.categories]);
             setActiveCategory('All');
           }
         })
-        .catch(err => console.error("Failed to load categories", err));
+        .catch(err => handleError("Failed to load categories", err));
     }
   }, [activeSourceId]);
 
@@ -93,6 +111,7 @@ export default function Channels() {
 
     engine.isFetching = true;
     setIsLoading(true);
+    setErrorMessage(null); // Clear previous errors on new fetch
 
     try {
       if (reset) engine.offset = 0;
@@ -104,6 +123,8 @@ export default function Channels() {
       if (engine.search.trim() !== '') url.searchParams.append('search', engine.search.trim());
 
       const response = await fetch(url.toString());
+      if (!response.ok) throw new Error(`Server returned ${response.status}`);
+      
       const data = await response.json();
 
       if (Array.isArray(data)) {
@@ -125,7 +146,7 @@ export default function Channels() {
       }
       engine.offset += 100;
     } catch (error) {
-      console.error("Failed to fetch channels", error);
+      handleError("Failed to fetch channels", error);
     } finally {
       engine.isFetching = false;
       setIsLoading(false);
@@ -138,37 +159,38 @@ export default function Channels() {
   }, [activeSourceId, activeCategory, debouncedSearch, loadMoreChannels]);
 
   // ==========================================
-  // CARD ACTIONS (Play, Favorite, Copy, External)
+  // CARD ACTIONS
   // ==========================================
   const handleCardClick = (e: React.MouseEvent, channel: any) => {
     if (isLongPress) {
       e.preventDefault();
-      return; // Prevent video from playing if they were just copying the link
+      return; 
     }
-    // Removed navigate('/') to prevent kicking user back to favorites page
     setPlayingChannel(channel.stream_url, channel.name, channel.logo_url);
   };
 
   const handleTouchStart = (url: string) => {
     setIsLongPress(false);
-    pressTimer.current = setTimeout(() => {
+    // Use window.setTimeout explicitly for browser-native typing
+    pressTimer.current = window.setTimeout(() => {
       navigator.clipboard.writeText(url).then(() => {
         setIsLongPress(true);
-        if (navigator.vibrate) navigator.vibrate(50); // Small haptic feedback
+        if (navigator.vibrate) navigator.vibrate(50); 
         alert('Copied stream link to clipboard!');
+      }).catch(err => {
+        handleError("Failed to copy link", err);
       });
     }, 2000);
   };
 
   const handleTouchEnd = () => {
-    if (pressTimer.current) clearTimeout(pressTimer.current);
+    if (pressTimer.current) window.clearTimeout(pressTimer.current);
   };
 
   const toggleFavorite = async (e: React.MouseEvent, channel: any) => {
-    e.stopPropagation(); // Stop card click
+    e.stopPropagation(); 
     const isFav = favorites.has(channel.id);
     
-    // Optimistic UI update
     setFavorites(prev => {
       const next = new Set(prev);
       isFav ? next.delete(channel.id) : next.add(channel.id);
@@ -176,22 +198,25 @@ export default function Channels() {
     });
 
     try {
-      if (isFav) {
-        await fetch(`${API_URL}/api/favorites/${encodeURIComponent(channel.id)}`, { method: 'DELETE' });
-      } else {
-        await fetch(`${API_URL}/api/favorites`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ channel_id: channel.id })
-        });
-      }
+      const response = await fetch(`${API_URL}/api/favorites${isFav ? `/${encodeURIComponent(channel.id)}` : ''}`, {
+        method: isFav ? 'DELETE' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: isFav ? undefined : JSON.stringify({ channel_id: channel.id })
+      });
+      if (!response.ok) throw new Error("Database rejected favorite sync");
     } catch (error) {
-      console.error("Failed to sync favorite with database", error);
+      // Revert UI if server fails
+      setFavorites(prev => {
+        const revert = new Set(prev);
+        isFav ? revert.add(channel.id) : revert.delete(channel.id);
+        return revert;
+      });
+      handleError("Failed to save favorite", error);
     }
   };
 
   const openExternal = (e: React.MouseEvent, url: string) => {
-    e.stopPropagation(); // Stop card click
+    e.stopPropagation();
     window.open(url, '_blank');
   };
 
@@ -217,6 +242,22 @@ export default function Channels() {
           />
         </div>
       </div>
+
+      {/* ERROR BANNER */}
+      {errorMessage && (
+        <div className="mb-4 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 flex items-start sm:items-center justify-between gap-3 animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center gap-3">
+            <AlertCircle className="text-red-500 shrink-0" size={20} />
+            <p className="text-sm font-medium text-red-200">{errorMessage}</p>
+          </div>
+          <button 
+            onClick={() => setErrorMessage(null)}
+            className="p-1 hover:bg-red-500/20 rounded-lg text-red-400 hover:text-red-300 transition-colors"
+          >
+            <X size={18} />
+          </button>
+        </div>
+      )}
 
       {/* NAVIGATION BARS */}
       <div className="mb-4">
@@ -342,6 +383,7 @@ export default function Channels() {
           </div>
         )}
 
+        {/* LOAD MORE BUTTON */}
         {hasMore && channels.length > 0 && (
           <div className="w-full py-8 flex justify-center">
             <button
