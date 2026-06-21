@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown, Star, ExternalLink, AlertCircle, X } from 'lucide-react';
+import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown, Star, ExternalLink, AlertCircle, X, Check } from 'lucide-react';
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
 
@@ -18,13 +18,15 @@ export default function Channels() {
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   
-  // Pagination, Touch & Error States
+  // Pagination, Touch, Error & Toast States
   const [isLoading, setIsLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [isLongPress, setIsLongPress] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
   
   const pressTimer = useRef<number | null>(null);
+  const toastTimer = useRef<number | null>(null);
 
   const engineRefs = useRef({
     offset: 0,
@@ -38,6 +40,14 @@ export default function Channels() {
   const handleError = (context: string, err: any) => {
     console.error(context, err);
     setErrorMessage(`${context}: ${err?.message || 'Unknown error occurred'}`);
+  };
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => {
+      setToastMessage(null);
+    }, 3000); // Disappears after 3 seconds
   };
 
   // 1. Fetch Sources & Favorites on initial load
@@ -172,7 +182,7 @@ export default function Channels() {
       navigator.clipboard.writeText(url).then(() => {
         setIsLongPress(true);
         if (navigator.vibrate) navigator.vibrate(50); 
-        alert('Copied stream link to clipboard!');
+        showToast('Stream link copied to clipboard'); // <-- NEW TOAST BANNER
       }).catch(err => {
         handleError("Failed to copy link", err);
       });
@@ -212,15 +222,24 @@ export default function Channels() {
 
   const openExternal = (e: React.MouseEvent, url: string) => {
     e.stopPropagation();
-    window.open(url, '_blank');
+    // THE FIX: Open in the same window so Android can intercept the intent directly
+    window.location.href = url;
   };
 
   const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'this playlist';
   const isSearching = debouncedSearch.trim() !== '';
 
   return (
-    <div className="h-full flex flex-col max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    <div className="h-full flex flex-col max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 relative">
       
+      {/* FLOATING TOAST BANNER */}
+      {toastMessage && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] bg-slate-800 text-slate-200 px-5 py-2.5 rounded-full shadow-[0_10px_40px_rgba(0,0,0,0.5)] border border-slate-700 font-medium text-sm flex items-center gap-2 animate-in slide-in-from-bottom-4 fade-in duration-300">
+          <Check className="text-blue-500" size={16} />
+          {toastMessage}
+        </div>
+      )}
+
       {/* HEADER & SEARCH BAR */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
