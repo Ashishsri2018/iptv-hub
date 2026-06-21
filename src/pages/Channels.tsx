@@ -17,9 +17,7 @@ export default function Channels() {
   const [isLoading, setIsLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
 
-  const observerTarget = useRef<HTMLDivElement>(null);
-
-  // THE FIX: Bulletproof background engine to prevent runaway loops
+  // Background engine to track pagination without triggering accidental renders
   const engineRefs = useRef({
     offset: 0,
     isFetching: false,
@@ -52,11 +50,10 @@ export default function Channels() {
     engineRefs.current.search = debouncedSearch;
   }, [activeCategory, debouncedSearch]);
 
-  // 4. The Core Fetching Engine (Completely detached from renders)
+  // 4. The Core Fetching Engine
   const loadMoreChannels = useCallback(async (reset = false) => {
     const engine = engineRefs.current;
 
-    // Guard clauses to stop the runaway train
     if (engine.isFetching) return;
     if (!reset && !engine.hasMore) return;
 
@@ -83,7 +80,7 @@ export default function Channels() {
       setChannels(prev => reset ? data.data : [...prev, ...data.data]);
       
       engine.hasMore = data.hasMore;
-      setHasMore(data.hasMore); // Update UI text
+      setHasMore(data.hasMore);
       engine.offset += 100;
 
     } catch (error) {
@@ -96,28 +93,9 @@ export default function Channels() {
 
   // 5. Trigger reset when category or search changes
   useEffect(() => {
-    setChannels([]); // Clear UI immediately
+    setChannels([]); 
     loadMoreChannels(true);
   }, [activeCategory, debouncedSearch, loadMoreChannels]);
-
-  // 6. The Stable Tripwire
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          loadMoreChannels(false);
-        }
-      },
-      // Trigger fetch when the user is 200px away from the bottom for smoother scrolling
-      { rootMargin: '200px' } 
-    );
-
-    if (observerTarget.current) {
-      observer.observe(observerTarget.current);
-    }
-
-    return () => observer.disconnect();
-  }, [loadMoreChannels]);
 
   const handlePlay = (channel: any) => {
     setPlayingChannel(channel.stream_url, channel.name, channel.logo_url);
@@ -210,18 +188,31 @@ export default function Channels() {
           </div>
         )}
 
-        {/* The Tripwire / Loading Indicator */}
-        <div ref={observerTarget} className="w-full py-8 flex justify-center">
-          {isLoading && (
-            <div className="flex items-center gap-2 text-blue-500 bg-blue-500/10 px-4 py-2 rounded-full border border-blue-500/20">
-              <Loader2 className="animate-spin" size={16} />
-              <span className="text-sm font-medium">Loading channels...</span>
-            </div>
-          )}
-          {!hasMore && channels.length > 0 && (
+        {/* MANUAL LOAD MORE BUTTON */}
+        {hasMore && channels.length > 0 && (
+          <div className="w-full py-8 flex justify-center">
+            <button
+              onClick={() => loadMoreChannels(false)}
+              disabled={isLoading}
+              className="px-6 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-full border border-slate-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+            >
+              {isLoading ? (
+                <>
+                  <Loader2 className="animate-spin text-blue-500" size={18} />
+                  Loading...
+                </>
+              ) : (
+                'Load More Channels'
+              )}
+            </button>
+          </div>
+        )}
+
+        {!hasMore && channels.length > 0 && (
+          <div className="w-full py-8 flex justify-center">
             <span className="text-slate-600 text-sm font-medium">End of list</span>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );
