@@ -214,13 +214,23 @@ export default {
         await env.DB.prepare("DELETE FROM favorites WHERE channel_id = ?").bind(channelId).run();
         return Response.json({ success: true }, { headers: corsHeaders });
       }
+      
       if (url.pathname === "/api/settings" && request.method === "GET") {
         const settings = await env.DB.prepare("SELECT * FROM settings WHERE id = 'global'").first();
         return Response.json(settings, { headers: corsHeaders });
       }
+
+      // THE UPDATED ROUTE WITH AUDIO/SUBTITLE SUPPORT
       if (url.pathname === "/api/settings" && request.method === "PUT") {
         const body = await request.json();
-        await env.DB.prepare("UPDATE settings SET default_quality = ?, auto_refresh_interval = ? WHERE id = 'global'").bind(body.default_quality, body.auto_refresh_interval).run();
+        await env.DB.prepare(
+          "UPDATE settings SET default_quality = ?, auto_refresh_interval = ?, default_audio = ?, default_subtitle = ? WHERE id = 'global'"
+        ).bind(
+          body.default_quality, 
+          body.auto_refresh_interval, 
+          body.default_audio || '', 
+          body.default_subtitle || ''
+        ).run();
         return Response.json({ success: true }, { headers: corsHeaders });
       }
 

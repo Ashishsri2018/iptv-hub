@@ -1,16 +1,20 @@
 import { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Save, MonitorPlay, RefreshCw, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { Settings as SettingsIcon, Save, MonitorPlay, RefreshCw, Loader2, CheckCircle, AlertCircle, Languages, Subtitles } from 'lucide-react';
 import { API_URL } from '../config';
 
 interface AppSettings {
   default_quality: string;
   auto_refresh_interval: string;
+  default_audio: string;
+  default_subtitle: string;
 }
 
 export default function Settings() {
   const [settings, setSettings] = useState<AppSettings>({
     default_quality: 'auto',
-    auto_refresh_interval: 'never'
+    auto_refresh_interval: 'never',
+    default_audio: '',
+    default_subtitle: ''
   });
   
   const [loading, setLoading] = useState(true);
@@ -25,7 +29,9 @@ export default function Settings() {
         if (data && !data.error) {
           setSettings({
             default_quality: data.default_quality || 'auto',
-            auto_refresh_interval: data.auto_refresh_interval || 'never'
+            auto_refresh_interval: data.auto_refresh_interval || 'never',
+            default_audio: data.default_audio || '',
+            default_subtitle: data.default_subtitle || ''
           });
         }
       } catch (error) {
@@ -74,37 +80,70 @@ export default function Settings() {
       <div className="space-y-6">
         
         {/* Playback Settings Card */}
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 md:p-6 shadow-sm">
-          <div className="flex items-center gap-2 mb-4 border-b border-slate-800 pb-3">
+        <div className="bg-[#12141a] border border-slate-800/60 rounded-xl p-5 md:p-6 shadow-sm">
+          <div className="flex items-center gap-2 mb-4 border-b border-slate-800/50 pb-3">
             <MonitorPlay className="text-slate-400" size={20} />
             <h3 className="text-lg font-semibold text-slate-200">Playback Preferences</h3>
           </div>
           
-          <div className="space-y-2">
-            <label className="block text-sm font-medium text-slate-400">Default Video Quality</label>
-            <p className="text-xs text-slate-500 mb-3">
-              Forces the player to use a specific stream quality if the channel provides multiple options.
-            </p>
-            <select 
-              value={settings.default_quality}
-              onChange={(e) => setSettings({ ...settings, default_quality: e.target.value })}
-              className="w-full md:w-1/2 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer appearance-none"
-            >
-              <option value="auto">Auto (Adaptive Bitrate - Recommended)</option>
-              <option value="high">High Quality (Max Resolution)</option>
-              <option value="low">Low Quality (Data Saver)</option>
-            </select>
+          <div className="space-y-5">
+            {/* Quality */}
+            <div>
+              <label className="block text-sm font-medium text-slate-400">Default Video Quality</label>
+              <p className="text-xs text-slate-500 mb-2">Forces the player to use a specific stream quality if available.</p>
+              <select 
+                value={settings.default_quality}
+                onChange={(e) => setSettings({ ...settings, default_quality: e.target.value })}
+                className="w-full md:w-1/2 bg-[#1a1e26] border border-slate-700/50 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer appearance-none text-sm"
+              >
+                <option value="auto">Auto (Adaptive Bitrate - Recommended)</option>
+                <option value="high">High Quality (Max Resolution)</option>
+                <option value="low">Low Quality (Data Saver)</option>
+              </select>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-2">
+              {/* Default Audio */}
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-slate-400">
+                  <Languages size={16} /> Default Audio Language
+                </label>
+                <p className="text-[11px] text-slate-500 mb-2 mt-1">Type standard codes like <b>eng</b>, <b>hin</b>, <b>spa</b>, or leave blank.</p>
+                <input 
+                  type="text"
+                  placeholder="e.g. eng, hindi, english"
+                  value={settings.default_audio}
+                  onChange={(e) => setSettings({ ...settings, default_audio: e.target.value })}
+                  className="w-full bg-[#1a1e26] border border-slate-700/50 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors text-sm"
+                />
+              </div>
+
+              {/* Default Subtitles */}
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-slate-400">
+                  <Subtitles size={16} /> Default Subtitles
+                </label>
+                <p className="text-[11px] text-slate-500 mb-2 mt-1">Type standard codes like <b>eng</b>, <b>hin</b>, <b>spa</b>, or leave blank.</p>
+                <input 
+                  type="text"
+                  placeholder="e.g. eng, hindi, english"
+                  value={settings.default_subtitle}
+                  onChange={(e) => setSettings({ ...settings, default_subtitle: e.target.value })}
+                  className="w-full bg-[#1a1e26] border border-slate-700/50 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors text-sm"
+                />
+              </div>
+            </div>
           </div>
         </div>
 
         {/* Data & Sync Settings Card */}
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 md:p-6 shadow-sm">
-          <div className="flex items-center gap-2 mb-4 border-b border-slate-800 pb-3">
+        <div className="bg-[#12141a] border border-slate-800/60 rounded-xl p-5 md:p-6 shadow-sm">
+          <div className="flex items-center gap-2 mb-4 border-b border-slate-800/50 pb-3">
             <RefreshCw className="text-slate-400" size={20} />
             <h3 className="text-lg font-semibold text-slate-200">Data & Synchronization</h3>
           </div>
           
-          <div className="space-y-2">
+          <div>
             <label className="block text-sm font-medium text-slate-400">Auto-Refresh Sources</label>
             <p className="text-xs text-slate-500 mb-3">
               The server will automatically fetch the latest channel links in the background.
@@ -112,7 +151,7 @@ export default function Settings() {
             <select 
               value={settings.auto_refresh_interval}
               onChange={(e) => setSettings({ ...settings, auto_refresh_interval: e.target.value })}
-              className="w-full md:w-1/2 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer appearance-none"
+              className="w-full md:w-1/2 bg-[#1a1e26] border border-slate-700/50 rounded-lg px-4 py-2.5 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors cursor-pointer appearance-none text-sm"
             >
               <option value="never">Never (Manual Refresh Only)</option>
               <option value="daily">Daily</option>

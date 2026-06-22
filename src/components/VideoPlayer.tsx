@@ -97,12 +97,16 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     const initializePlayer = async () => {
       let defaultQuality = 'auto';
       let defaultAudio = '';
+      let defaultSubtitle = '';
+
+      // Fetch global settings
       try {
         const res = await fetch(`${API_URL}/api/settings`);
         if (res.ok) {
           const data = await res.json();
           defaultQuality = data.default_quality || 'auto';
           defaultAudio = data.default_audio || '';
+          defaultSubtitle = data.default_subtitle || '';
         }
       } catch (e: any) { 
         console.error("Settings Fetch Error:", e); 
@@ -138,7 +142,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                 hls.audioTrack = idx;
                 setCurrentAudioTrack(idx);
               } else {
-                setCurrentAudioTrack(hls.audioTrack);
+                setCurrentAudioTrack(hls.audioTrack); // Fallback to stream default
               }
             } else {
               setCurrentAudioTrack(hls.audioTrack);
@@ -148,7 +152,21 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           // 3. Process Subtitles
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
             setSubtitleTracks(hls.subtitleTracks);
-            setCurrentSubtitleTrack(hls.subtitleTrack);
+            if (defaultSubtitle) {
+              // Look for a track that matches the user's preferred language string
+              const idx = hls.subtitleTracks.findIndex(t => 
+                t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
+                t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
+              );
+              if (idx !== -1) {
+                hls.subtitleTrack = idx;
+                setCurrentSubtitleTrack(idx);
+              } else {
+                setCurrentSubtitleTrack(-1); // Default to off if no match found
+              }
+            } else {
+              setCurrentSubtitleTrack(-1); // Default to off if no setting provided
+            }
           }
 
           setIsBuffering(false);
@@ -158,7 +176,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           });
         });
 
-        // THE FIX: Explicitly typed the unused parameters as 'any'
         if ((Hls.Events as any).AUDIO_TRACKS_UPDATED) {
           hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_: any, data: any) => setAudioTracks(data.audioTracks || []));
         }
@@ -174,7 +191,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               setIsBuffering(false);
             }
             else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              console.warn("Media error, attempting recovery...");
               hls.recoverMediaError();
             }
             else {
