@@ -184,14 +184,15 @@ export default function Favorites() {
                 
                 {/* DYNAMIC RENDER BASED ON VIEW MODE */}
                 <div className={viewMode === 'grid' 
-                  ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 sm:gap-4" 
+                  // INCREASED COLUMNS AND REDUCED GAP FOR SMALLER TILES
+                  ? "grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2 sm:gap-3" 
                   : "space-y-2 sm:space-y-3"
                 }>
                   {group.channels.map(channel => {
                     const isExternalOnly = !channel.stream_url.startsWith('http');
                     
                     // ==========================================
-                    // GRID VIEW CARD
+                    // COMPACT GRID VIEW CARD
                     // ==========================================
                     if (viewMode === 'grid') {
                       return (
@@ -208,22 +209,24 @@ export default function Favorites() {
                           }}
                           className="bg-[#12141a] border border-slate-800/60 rounded-xl overflow-hidden hover:border-blue-500/50 hover:shadow-[0_0_15px_rgba(59,130,246,0.15)] transition-all cursor-pointer group flex flex-col relative"
                         >
-                          <div className="absolute top-2 right-2 z-10 flex gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                          {/* SMALLER ACTION ICONS */}
+                          <div className="absolute top-1 right-1 z-10 flex gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                             <button
                               onClick={(e) => launchExternalPlayer(e, channel.stream_url, channel.name)}
-                              className="p-1.5 bg-black/70 hover:bg-black rounded-lg text-slate-200 hover:text-white backdrop-blur-md transition-colors"
+                              className="p-1 bg-black/70 hover:bg-black rounded-md text-slate-200 hover:text-white backdrop-blur-md transition-colors"
                             >
-                              <ExternalLink size={16} />
+                              <ExternalLink size={14} />
                             </button>
                             <button
                               onClick={(e) => removeFavorite(e, channel.id)}
-                              className="p-1.5 bg-black/70 hover:bg-red-500/90 rounded-lg text-slate-200 hover:text-white backdrop-blur-md transition-colors"
+                              className="p-1 bg-black/70 hover:bg-red-500/90 rounded-md text-slate-200 hover:text-white backdrop-blur-md transition-colors"
                             >
-                              <Trash2 size={16} />
+                              <Trash2 size={14} />
                             </button>
                           </div>
 
-                          <div className="aspect-video bg-[#0b0c10] relative flex items-center justify-center p-4">
+                          {/* SMALLER IMAGE CONTAINER */}
+                          <div className="aspect-video bg-[#0b0c10] relative flex items-center justify-center p-2">
                             {channel.logo_url ? (
                               <img 
                                 src={channel.logo_url} 
@@ -235,24 +238,25 @@ export default function Favorites() {
                                 }}
                               />
                             ) : null}
-                            <div className={`font-bold text-slate-600 text-3xl absolute ${channel.logo_url ? 'hidden' : ''}`}>
+                            <div className={`font-bold text-slate-600 text-2xl absolute ${channel.logo_url ? 'hidden' : ''}`}>
                               {channel.name.charAt(0).toUpperCase()}
                             </div>
                             
                             <div className="absolute inset-0 bg-blue-600/0 group-hover:bg-blue-600/20 transition-colors flex items-center justify-center">
                               {!isExternalOnly && (
-                                <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transform scale-75 group-hover:scale-100 transition-all shadow-lg">
-                                  <Play size={20} className="ml-1" />
+                                <div className="w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transform scale-75 group-hover:scale-100 transition-all shadow-lg">
+                                  <Play size={14} className="ml-0.5" />
                                 </div>
                               )}
                             </div>
                           </div>
                           
-                          <div className="p-3 border-t border-slate-800/50 flex-1 flex flex-col justify-between">
-                            <h3 className="text-slate-200 font-medium text-sm line-clamp-2 leading-tight group-hover:text-blue-400 transition-colors">
+                          {/* SMALLER TEXT CONTAINER */}
+                          <div className="p-2 border-t border-slate-800/50 flex-1 flex flex-col justify-between">
+                            <h3 className="text-slate-200 font-medium text-xs line-clamp-2 leading-tight group-hover:text-blue-400 transition-colors">
                               {channel.name}
                             </h3>
-                            <div className="mt-2 text-[10px] text-slate-500 font-semibold truncate uppercase tracking-wide">
+                            <div className="mt-1 text-[9px] text-slate-500 font-semibold truncate uppercase tracking-wide">
                               {channel.source_name}
                             </div>
                           </div>
@@ -261,7 +265,7 @@ export default function Favorites() {
                     }
 
                     // ==========================================
-                    // LIST VIEW ROW
+                    // LIST VIEW ROW (Kept Identical)
                     // ==========================================
                     return (
                       <div 
