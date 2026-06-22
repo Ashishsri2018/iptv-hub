@@ -1,7 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, ChevronDown, Star, ExternalLink, AlertCircle, X, Check } from 'lucide-react';
+import { Play, Search, Tv2, Loader2, Image as ImageIcon, Folder, Star, ExternalLink, AlertCircle, X, Check } from 'lucide-react';
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
+
+// Custom Marquee Component for continuous scrolling text
+const MarqueeText = ({ text }: { text: string }) => (
+  <div className="overflow-hidden whitespace-nowrap flex w-full relative">
+    <div className="animate-marquee-custom min-w-full flex">
+      <span className="pr-12">{text || 'Unknown'}</span>
+      <span className="pr-12">{text || 'Unknown'}</span>
+    </div>
+  </div>
+);
 
 export default function Channels() {
   const { setPlayingChannel } = useAppStore();
@@ -220,28 +230,17 @@ export default function Channels() {
     }
   };
 
-  // ==========================================
-  // THE ULTIMATE ANDROID INTENT FIX
-  // ==========================================
   const openExternal = (e: React.MouseEvent, url: string) => {
     e.stopPropagation();
-    
-    // Check if the user is on an Android device
     const isAndroid = /Android/i.test(navigator.userAgent);
     
     if (isAndroid) {
-      // Strip the http:// or https:// from the URL
       const isHttps = url.startsWith('https://');
       const cleanUrl = url.replace(/^https?:\/\//, '');
       const scheme = isHttps ? 'https' : 'http';
-      
-      // Construct an explicit Android Intent URI that asks for a video player
       const intentUrl = `intent://${cleanUrl}#Intent;action=android.intent.action.VIEW;scheme=${scheme};type=video/*;end;`;
-      
-      // Force the browser to hand the link over to the Android OS
       window.location.href = intentUrl;
     } else {
-      // Fallback for PC/Mac/iOS
       window.open(url, '_blank');
     }
   };
@@ -250,8 +249,29 @@ export default function Channels() {
   const isSearching = debouncedSearch.trim() !== '';
 
   return (
-    <div className="h-full flex flex-col max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 relative">
+    <div className="h-full flex flex-col max-w-7xl mx-auto py-4 sm:py-6 relative overflow-hidden bg-[#0f1115]">
       
+      {/* CSS INJECTION FOR MARQUEE & SCROLLBAR */}
+      <style>{`
+        @keyframes marquee-scroll {
+          0% { transform: translateX(0); }
+          100% { transform: translateX(-50%); }
+        }
+        .animate-marquee-custom {
+          animation: marquee-scroll 10s linear infinite;
+        }
+        .animate-marquee-custom:hover {
+          animation-play-state: paused;
+        }
+        .hide-scroll::-webkit-scrollbar {
+          display: none;
+        }
+        .hide-scroll {
+          -ms-overflow-style: none;
+          scrollbar-width: none;
+        }
+      `}</style>
+
       {/* FLOATING TOAST BANNER */}
       {toastMessage && (
         <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] bg-slate-800 text-slate-200 px-5 py-2.5 rounded-full shadow-[0_10px_40px_rgba(0,0,0,0.5)] border border-slate-700 font-medium text-sm flex items-center gap-2 animate-in slide-in-from-bottom-4 fade-in duration-300">
@@ -260,47 +280,46 @@ export default function Channels() {
         </div>
       )}
 
-      {/* HEADER & SEARCH BAR */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-        <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
-          <Tv2 className="text-blue-500" /> Channels
-        </h1>
-        <div className="relative w-full sm:w-80">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-          <input
-            type="text"
-            placeholder={`Search in ${activeSourceName}...`}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-slate-900 border border-slate-700 rounded-full pl-10 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-all"
-          />
+      {/* HEADER & SEARCH BAR (Fixed at top) */}
+      <div className="px-4 sm:px-6 mb-4 shrink-0">
+        <div className="flex flex-col gap-4">
+          <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
+            <Tv2 className="text-blue-500" /> Channels
+          </h1>
+          <div className="relative w-full">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+            <input
+              type="text"
+              placeholder={`Search in ${activeSourceName}...`}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-[#1e232d] border border-slate-700/50 rounded-full pl-10 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-all"
+            />
+          </div>
         </div>
       </div>
 
       {/* ERROR BANNER */}
       {errorMessage && (
-        <div className="mb-4 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 flex items-start sm:items-center justify-between gap-3 animate-in fade-in slide-in-from-top-2">
+        <div className="mx-4 sm:mx-6 mb-4 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 flex items-start sm:items-center justify-between gap-3 animate-in fade-in shrink-0">
           <div className="flex items-center gap-3">
             <AlertCircle className="text-red-500 shrink-0" size={20} />
             <p className="text-sm font-medium text-red-200">{errorMessage}</p>
           </div>
-          <button 
-            onClick={() => setErrorMessage(null)}
-            className="p-1 hover:bg-red-500/20 rounded-lg text-red-400 hover:text-red-300 transition-colors"
-          >
+          <button onClick={() => setErrorMessage(null)} className="p-1 hover:bg-red-500/20 rounded-lg text-red-400 hover:text-red-300 transition-colors">
             <X size={18} />
           </button>
         </div>
       )}
 
-      {/* NAVIGATION BARS */}
-      <div className="mb-4">
-        <div className="flex overflow-x-auto pb-3 gap-2 custom-scrollbar shrink-0 border-b border-slate-800/50 mb-4">
+      {/* PLAYLIST TABS (Horizontal Scroll) */}
+      <div className="px-4 sm:px-6 mb-2 shrink-0">
+        <div className="flex overflow-x-auto pb-3 gap-2 hide-scroll border-b border-slate-800/50">
           {sources.length > 1 && (
             <button
               onClick={() => setActiveSourceId('All')}
-              className={`whitespace-nowrap px-5 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
-                ${activeSourceId === 'All' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
+              className={`whitespace-nowrap px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
+                ${activeSourceId === 'All' ? 'bg-blue-600 text-white shadow-lg' : 'bg-transparent text-slate-400 hover:bg-slate-800'}`}
             >
               <Folder size={16} /> All Playlists
             </button>
@@ -309,133 +328,135 @@ export default function Channels() {
             <button
               key={src.id}
               onClick={() => setActiveSourceId(src.id)}
-              className={`whitespace-nowrap px-5 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
-                ${activeSourceId === src.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`}
+              className={`whitespace-nowrap px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
+                ${activeSourceId === src.id ? 'bg-blue-600 text-white shadow-lg' : 'bg-transparent text-slate-400 hover:bg-slate-800'}`}
             >
               <Folder size={16} /> {src.name}
             </button>
           ))}
         </div>
-
-        <div className="relative mb-5 w-full sm:w-72">
-          <select
-            value={activeCategory}
-            onChange={(e) => setActiveCategory(e.target.value)}
-            className="w-full appearance-none bg-slate-800 border border-slate-700 text-slate-200 px-4 py-2.5 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-medium cursor-pointer shadow-lg"
-          >
-            {categories.map((cat) => (
-              <option key={cat.name} value={cat.name} className="bg-slate-900 text-slate-200">
-                {cat.name} ({cat.count})
-              </option>
-            ))}
-          </select>
-          <div className="absolute inset-y-0 right-0 flex items-center px-4 pointer-events-none text-slate-400">
-            <ChevronDown size={18} />
-          </div>
-        </div>
       </div>
 
       {isSearching && (
-        <div className="mb-6 text-sm text-blue-400 font-medium">
+        <div className="px-4 sm:px-6 mb-2 text-sm text-blue-400 font-medium shrink-0">
           Showing results for "{debouncedSearch}"...
         </div>
       )}
 
-      {/* CHANNEL GRID */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 pb-24">
-        {channels.length === 0 && !isLoading ? (
-          <div className="flex flex-col items-center justify-center h-64 text-slate-500">
-            <Tv2 size={48} className="mb-4 opacity-20" />
-            <p>No channels found here.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 sm:gap-4">
-            {channels.map((channel, index) => (
-              <div 
-                key={`${channel.id}-${index}`} 
-                onClick={(e) => handleCardClick(e, channel)}
-                onTouchStart={() => handleTouchStart(channel.stream_url)}
-                onTouchEnd={handleTouchEnd}
-                onTouchMove={handleTouchEnd}
-                onMouseDown={() => handleTouchStart(channel.stream_url)}
-                onMouseUp={handleTouchEnd}
-                onMouseLeave={handleTouchEnd}
-                className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden hover:border-blue-500/50 transition-all cursor-pointer group flex flex-col relative select-none"
-              >
-                {/* ACTION ICONS (Favorites & External) */}
-                <div className="absolute top-2 right-2 z-10 flex gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={(e) => openExternal(e, channel.stream_url)}
-                    className="p-1.5 bg-black/60 hover:bg-black/80 rounded-lg text-slate-200 hover:text-white backdrop-blur-sm transition-colors"
-                  >
-                    <ExternalLink size={16} />
-                  </button>
-                  <button
-                    onClick={(e) => toggleFavorite(e, channel)}
-                    className="p-1.5 bg-black/60 hover:bg-black/80 rounded-lg backdrop-blur-sm transition-colors"
-                  >
-                    <Star 
-                      size={16} 
-                      className={favorites.has(channel.id) ? "fill-yellow-400 text-yellow-400" : "text-slate-200 hover:text-white"} 
-                    />
-                  </button>
-                </div>
+      {/* ========================================== */}
+      {/* SIDE-BY-SIDE SPLIT LAYOUT */}
+      {/* ========================================== */}
+      <div className="flex-1 flex overflow-hidden w-full relative">
+        
+        {/* LEFT PANE: Categories Column */}
+        <div className="w-[38%] sm:w-56 flex flex-col border-r border-slate-800/50 bg-[#12141a] overflow-y-auto hide-scroll pb-24">
+          {categories.map((cat) => (
+            <button
+              key={cat.name}
+              onClick={() => setActiveCategory(cat.name)}
+              className={`flex items-center justify-between px-3 py-3.5 text-sm transition-colors border-l-2
+                ${activeCategory === cat.name 
+                  ? 'bg-[#2a303c] border-blue-500 text-blue-400' 
+                  : 'border-transparent text-slate-300 hover:bg-slate-800'
+                }`}
+            >
+              {/* Category Marquee */}
+              <div className="flex-1 overflow-hidden mr-2">
+                <MarqueeText text={cat.name} />
+              </div>
+              <span className="text-[10px] sm:text-xs font-mono opacity-60 shrink-0">{cat.count}</span>
+            </button>
+          ))}
+        </div>
 
-                <div className="aspect-video bg-slate-950 relative flex items-center justify-center p-4">
-                  {channel.logo_url ? (
-                    <img 
-                      src={channel.logo_url} 
-                      alt={channel.name} 
-                      className="max-h-full max-w-full object-contain drop-shadow-lg group-hover:scale-110 transition-transform duration-300 pointer-events-none"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = 'none';
-                        (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
-                      }}
-                    />
-                  ) : null}
-                  <div className={`text-slate-700 ${channel.logo_url ? 'hidden' : ''}`}>
-                    <ImageIcon size={32} />
-                  </div>
-                  
-                  <div className="absolute inset-0 bg-blue-600/0 group-hover:bg-blue-600/20 transition-colors flex items-center justify-center">
-                    <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transform scale-75 group-hover:scale-100 transition-all shadow-lg">
-                      <Play size={20} className="ml-1" />
+        {/* RIGHT PANE: Channels List Column */}
+        <div className="flex-1 flex flex-col bg-[#0f1115] overflow-y-auto hide-scroll pb-24 relative">
+          {channels.length === 0 && !isLoading ? (
+            <div className="flex flex-col items-center justify-center h-full text-slate-500 p-4 text-center">
+              <Tv2 size={40} className="mb-3 opacity-20" />
+              <p className="text-sm">No channels found here.</p>
+            </div>
+          ) : (
+            <div className="flex flex-col">
+              {channels.map((channel, index) => (
+                <div 
+                  key={`${channel.id}-${index}`} 
+                  onClick={(e) => handleCardClick(e, channel)}
+                  onTouchStart={() => handleTouchStart(channel.stream_url)}
+                  onTouchEnd={handleTouchEnd}
+                  onTouchMove={handleTouchEnd}
+                  onMouseDown={() => handleTouchStart(channel.stream_url)}
+                  onMouseUp={handleTouchEnd}
+                  onMouseLeave={handleTouchEnd}
+                  className="flex items-center p-2 sm:p-3 border-b border-slate-800/50 hover:bg-[#1a1e26] transition-colors cursor-pointer select-none group"
+                >
+                  {/* Channel Logo */}
+                  <div className="w-12 h-12 sm:w-14 sm:h-14 bg-[#1e232d] rounded-xl flex items-center justify-center shrink-0 overflow-hidden shadow-inner relative">
+                    {channel.logo_url ? (
+                      <img 
+                        src={channel.logo_url} 
+                        alt="" 
+                        className="max-h-full max-w-full object-contain pointer-events-none"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = 'none';
+                          (e.target as HTMLImageElement).nextElementSibling?.classList.remove('hidden');
+                        }}
+                      />
+                    ) : null}
+                    <div className={`text-slate-600 ${channel.logo_url ? 'hidden' : ''}`}>
+                      <ImageIcon size={24} />
                     </div>
                   </div>
-                </div>
-                
-                <div className="p-3 border-t border-slate-800 flex-1 flex flex-col justify-between">
-                  <h3 className="text-slate-200 font-medium text-sm line-clamp-2 leading-tight group-hover:text-blue-400 transition-colors">
-                    {channel.name}
-                  </h3>
-                  <div className="mt-2 text-xs text-slate-500 font-medium truncate">
-                    {channel.channel_group || 'Uncategorized'}
+
+                  {/* Channel Name Marquee */}
+                  <div className="flex-1 overflow-hidden ml-3 mr-2">
+                    <div className="text-slate-200 text-sm sm:text-base font-medium">
+                      <MarqueeText text={channel.name} />
+                    </div>
+                  </div>
+
+                  {/* Action Icons */}
+                  <div className="flex items-center gap-1.5 shrink-0 opacity-80 group-hover:opacity-100">
+                    <button
+                      onClick={(e) => openExternal(e, channel.stream_url)}
+                      className="p-2 sm:p-2.5 bg-[#171a21] hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-colors"
+                    >
+                      <ExternalLink size={16} />
+                    </button>
+                    <button
+                      onClick={(e) => toggleFavorite(e, channel)}
+                      className="p-2 sm:p-2.5 bg-[#171a21] hover:bg-slate-700 rounded-lg transition-colors"
+                    >
+                      <Star 
+                        size={16} 
+                        className={favorites.has(channel.id) ? "fill-yellow-400 text-yellow-400" : "text-slate-300 hover:text-white"} 
+                      />
+                    </button>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
 
-        {/* LOAD MORE BUTTON */}
-        {hasMore && channels.length > 0 && (
-          <div className="w-full py-8 flex justify-center">
-            <button
-              onClick={() => loadMoreChannels(false)}
-              disabled={isLoading}
-              className="px-6 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-full border border-slate-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="animate-spin text-blue-500" size={18} />
-                  Loading...
-                </>
-              ) : (
-                'Load More Channels'
-              )}
-            </button>
-          </div>
-        )}
+          {/* Load More Button inside the Right Pane */}
+          {hasMore && channels.length > 0 && (
+            <div className="w-full p-6 flex justify-center">
+              <button
+                onClick={() => loadMoreChannels(false)}
+                disabled={isLoading}
+                className="px-6 py-2.5 bg-[#1e232d] hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-full border border-slate-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 className="animate-spin text-blue-500" size={18} /> Loading...
+                  </>
+                ) : (
+                  'Load More'
+                )}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

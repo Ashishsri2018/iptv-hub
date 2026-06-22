@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { API_URL } from '../config';
-import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink } from 'lucide-react';
+import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles } from 'lucide-react';
 import { useAppStore } from '../store';
 
 interface VideoPlayerProps {
@@ -28,12 +28,20 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [isLive, setIsLive] = useState(true);
   
   const [showControls, setShowControls] = useState(true);
-  const [showQualityMenu, setShowQualityMenu] = useState(false);
   const hideControlsTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // THE FIX: Changed from Hls.Level[] to any[] to satisfy TypeScript strict mode
+  // Menus & Tracks States
+  const [activeMenu, setActiveMenu] = useState<'quality' | 'audio' | 'subtitles' | null>(null);
+  const activeMenuRef = useRef<'quality' | 'audio' | 'subtitles' | null>(null);
+
   const [levels, setLevels] = useState<any[]>([]);
   const [currentLevel, setCurrentLevel] = useState<number>(-1);
+
+  const [audioTracks, setAudioTracks] = useState<any[]>([]);
+  const [currentAudioTrack, setCurrentAudioTrack] = useState<number>(-1);
+
+  const [subtitleTracks, setSubtitleTracks] = useState<any[]>([]);
+  const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
 
   const formatTime = (seconds: number) => {
     if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "00:00";
@@ -57,6 +65,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   useEffect(() => {
     setHasFatalError(false);
     setExactErrorMsg("");
+    setActiveMenu(null);
+    activeMenuRef.current = null;
     
     if (containerRef.current) {
       containerRef.current.style.opacity = '1';
@@ -86,11 +96,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
     const initializePlayer = async () => {
       let defaultQuality = 'auto';
+      let defaultAudio = '';
       try {
         const res = await fetch(`${API_URL}/api/settings`);
         if (res.ok) {
           const data = await res.json();
           defaultQuality = data.default_quality || 'auto';
+          defaultAudio = data.default_audio || '';
         }
       } catch (e: any) { 
         console.error("Settings Fetch Error:", e); 
@@ -103,8 +115,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
 
-        // THE FIX: Replaced unused 'event' parameter with '_'
         hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+          // 1. Process Video Quality
           setLevels(data.levels);
           let targetLevel = -1; 
           if (data.levels.length > 1) {
@@ -113,6 +125,32 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           }
           hls.currentLevel = targetLevel;
           setCurrentLevel(targetLevel);
+
+          // 2. Process Audio Tracks
+          if (hls.audioTracks && hls.audioTracks.length > 1) {
+            setAudioTracks(hls.audioTracks);
+            if (defaultAudio) {
+              const idx = hls.audioTracks.findIndex(t => 
+                t.name?.toLowerCase().includes(defaultAudio.toLowerCase()) || 
+                t.lang?.toLowerCase().includes(defaultAudio.toLowerCase())
+              );
+              if (idx !== -1) {
+                hls.audioTrack = idx;
+                setCurrentAudioTrack(idx);
+              } else {
+                setCurrentAudioTrack(hls.audioTrack);
+              }
+            } else {
+              setCurrentAudioTrack(hls.audioTrack);
+            }
+          }
+
+          // 3. Process Subtitles
+          if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
+            setSubtitleTracks(hls.subtitleTracks);
+            setCurrentSubtitleTrack(hls.subtitleTrack);
+          }
+
           setIsBuffering(false);
           video.play().catch(e => {
             console.error("Autoplay Error:", e);
@@ -120,7 +158,14 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           });
         });
 
-        // THE FIX: Replaced unused 'event' parameter with '_'
+        // Safe dynamic listeners in case tracks load late
+        if ((Hls.Events as any).AUDIO_TRACKS_UPDATED) {
+          hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_, data: any) => setAudioTracks(data.audioTracks || []));
+        }
+        if ((Hls.Events as any).SUBTITLE_TRACKS_UPDATED) {
+          hls.on((Hls.Events as any).SUBTITLE_TRACKS_UPDATED, (_, data: any) => setSubtitleTracks(data.subtitleTracks || []));
+        }
+
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data.fatal) {
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -147,7 +192,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           setIsBuffering(false);
           video.play().catch(() => setIsPlaying(false));
         });
-        // THE FIX: Removed unused 'e' parameter
         video.addEventListener('error', () => {
           setExactErrorMsg("Native Browser Error: The media format is unsupported or the connection was rejected.");
           setHasFatalError(true);
@@ -174,6 +218,62 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       video.load(); 
     };
   }, [streamUrl]);
+
+  // ==========================================
+  // CONTROLS & MENUS
+  // ==========================================
+  const toggleMenu = (menu: 'quality' | 'audio' | 'subtitles') => {
+    const nextMenu = activeMenu === menu ? null : menu;
+    setActiveMenu(nextMenu);
+    activeMenuRef.current = nextMenu;
+  };
+
+  const changeQuality = (levelIndex: number) => {
+    if (hlsRef.current) {
+      hlsRef.current.currentLevel = levelIndex;
+      setCurrentLevel(levelIndex);
+      setActiveMenu(null);
+      activeMenuRef.current = null;
+    }
+  };
+
+  const changeAudioTrack = (trackIndex: number) => {
+    if (hlsRef.current) {
+      hlsRef.current.audioTrack = trackIndex;
+      setCurrentAudioTrack(trackIndex);
+      setActiveMenu(null);
+      activeMenuRef.current = null;
+    }
+  };
+
+  const changeSubtitleTrack = (trackIndex: number) => {
+    if (hlsRef.current) {
+      hlsRef.current.subtitleTrack = trackIndex;
+      setCurrentSubtitleTrack(trackIndex);
+      setActiveMenu(null);
+      activeMenuRef.current = null;
+    }
+  };
+
+  const startControlHideTimer = () => {
+    if (hasFatalError) return;
+    setShowControls(true);
+    if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
+    hideControlsTimeout.current = setTimeout(() => {
+      if (!activeMenuRef.current) setShowControls(false); 
+    }, 3000);
+  };
+
+  const handleContainerTap = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).tagName.toLowerCase() === 'video') {
+      setActiveMenu(null);
+      activeMenuRef.current = null;
+      setShowControls(prev => !prev);
+      if (!showControls) startControlHideTimer();
+    } else {
+      startControlHideTimer();
+    }
+  };
 
   const togglePlay = () => {
     if (hasFatalError) return;
@@ -236,39 +336,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         console.warn("Fullscreen Error:", e); 
       }
     } else {
-      document.exitFullscreen().catch();
+      document.exitFullscreen().catch(e => console.warn(e));
     }
   };
 
   const togglePiP = () => {
     if (document.pictureInPictureElement) document.exitPictureInPicture();
     else videoRef.current?.requestPictureInPicture();
-  };
-
-  const changeQuality = (levelIndex: number) => {
-    if (hlsRef.current) {
-      hlsRef.current.currentLevel = levelIndex;
-      setCurrentLevel(levelIndex);
-      setShowQualityMenu(false);
-    }
-  };
-
-  const startControlHideTimer = () => {
-    if (hasFatalError) return;
-    setShowControls(true);
-    if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
-    hideControlsTimeout.current = setTimeout(() => {
-      if (!showQualityMenu) setShowControls(false); 
-    }, 3000);
-  };
-
-  const handleContainerTap = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).tagName.toLowerCase() === 'video') {
-      setShowControls(prev => !prev);
-      if (!showControls) startControlHideTimer();
-    } else {
-      startControlHideTimer();
-    }
   };
 
   const launchExternalPlayer = () => {
@@ -281,25 +355,18 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         if (match) {
           const scheme = match[1];
           const path = match[2];
-          // THE FIX: Added fallback generic string if channelName is null
           const safeName = channelName || 'Live Channel';
+          // THE FIX: Perfect Intent URI structure to force OS player choice
           targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(safeName)};end;`;
-        } else {
-          console.warn("URL match failed, using fallback.");
         }
       } else {
         targetUrl = `vlc://${streamUrl}`;
       }
       
-      const a = document.createElement('a');
-      a.href = targetUrl;
-      a.target = '_top';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      // THE FIX: Directly change window location instead of using dummy 'a' tag
+      window.location.href = targetUrl;
     } catch (error: any) {
       console.error("External Player Launch Error:", error);
-      alert(`Could not launch external player: ${error.message}`);
     }
   };
 
@@ -309,7 +376,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       className="relative w-full h-full bg-black group transition-opacity duration-200"
       onMouseMove={startControlHideTimer}
       onClick={handleContainerTap}
-      onMouseLeave={() => { if (!showQualityMenu && !hasFatalError) setShowControls(false); }}
+      onMouseLeave={() => { if (!activeMenuRef.current && !hasFatalError) setShowControls(false); }}
     >
       <video
         ref={videoRef}
@@ -327,13 +394,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         </div>
       )}
 
-      {/* DETAILED ERROR FALLBACK UI */}
+      {/* ERROR FALLBACK UI */}
       {hasFatalError && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-slate-900/90 text-center p-6 animate-in fade-in duration-300">
           <AlertTriangle size={56} className="text-yellow-500 mb-4 drop-shadow-lg" />
           <h3 className="text-2xl font-bold text-white mb-2 tracking-wide">Stream Blocked</h3>
           <p className="text-slate-300 mb-2 max-w-sm text-sm sm:text-base">
-            Your browser's security settings (CORS) are blocking this stream. However, you can still play it natively using an external app like VLC.
+            Your browser's security settings (CORS) are blocking this stream. Play it natively using an external app like VLC.
           </p>
           <div className="bg-black/50 border border-red-900/50 rounded p-3 mb-8 w-full max-w-md">
             <p className="text-red-400 font-mono text-xs break-all text-left">{exactErrorMsg}</p>
@@ -383,21 +450,63 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             </div>
 
             <div className="flex items-center gap-4 sm:gap-5 relative">
+              
+              {/* SUBTITLES MENU */}
+              {subtitleTracks.length > 0 && (
+                <div className="relative">
+                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('subtitles'); }} className={`transition-colors ${activeMenu === 'subtitles' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
+                    <Subtitles size={20} />
+                  </button>
+                  {activeMenu === 'subtitles' && (
+                    <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
+                      <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Subtitles</span></div>
+                      <button onClick={() => changeSubtitleTrack(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
+                        Off {currentSubtitleTrack === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+                      </button>
+                      {subtitleTracks.map((track, idx) => (
+                        <button key={idx} onClick={() => changeSubtitleTrack(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between truncate">
+                          {track.name || track.lang || `Track ${idx + 1}`} {currentSubtitleTrack === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* AUDIO MENU */}
+              {audioTracks.length > 1 && (
+                <div className="relative">
+                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('audio'); }} className={`transition-colors ${activeMenu === 'audio' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
+                    <AudioLines size={20} />
+                  </button>
+                  {activeMenu === 'audio' && (
+                    <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
+                      <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Audio Track</span></div>
+                      {audioTracks.map((track, idx) => (
+                        <button key={idx} onClick={() => changeAudioTrack(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between truncate">
+                          {track.name || track.lang || `Track ${idx + 1}`} {currentAudioTrack === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* QUALITY MENU */}
               {levels.length > 0 && (
                 <div className="relative">
-                  <button onClick={(e) => { e.stopPropagation(); setShowQualityMenu(!showQualityMenu); }} className={`transition-colors ${showQualityMenu ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
+                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('quality'); }} className={`transition-colors ${activeMenu === 'quality' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
                     <Settings2 size={20} />
                   </button>
-                  
-                  {showQualityMenu && (
+                  {activeMenu === 'quality' && (
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Quality</span></div>
                       <button onClick={() => changeQuality(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
-                        Auto {currentLevel === -1 && <Check size={14} className="text-blue-400" />}
+                        Auto {currentLevel === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
                       </button>
                       {levels.map((level, idx) => (
                         <button key={idx} onClick={() => changeQuality(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
-                          {level.height ? `${level.height}p` : `Level ${idx + 1}`} {currentLevel === idx && <Check size={14} className="text-blue-400" />}
+                          {level.height ? `${level.height}p` : `Level ${idx + 1}`} {currentLevel === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
                         </button>
                       ))}
                     </div>
