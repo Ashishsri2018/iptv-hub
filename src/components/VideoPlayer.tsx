@@ -115,7 +115,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
 
-        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+        hls.on(Hls.Events.MANIFEST_PARSED, (_: any, data: any) => {
           // 1. Process Video Quality
           setLevels(data.levels);
           let targetLevel = -1; 
@@ -158,15 +158,15 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           });
         });
 
-        // Safe dynamic listeners in case tracks load late
+        // THE FIX: Explicitly typed the unused parameters as 'any'
         if ((Hls.Events as any).AUDIO_TRACKS_UPDATED) {
-          hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_, data: any) => setAudioTracks(data.audioTracks || []));
+          hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_: any, data: any) => setAudioTracks(data.audioTracks || []));
         }
         if ((Hls.Events as any).SUBTITLE_TRACKS_UPDATED) {
-          hls.on((Hls.Events as any).SUBTITLE_TRACKS_UPDATED, (_, data: any) => setSubtitleTracks(data.subtitleTracks || []));
+          hls.on((Hls.Events as any).SUBTITLE_TRACKS_UPDATED, (_: any, data: any) => setSubtitleTracks(data.subtitleTracks || []));
         }
 
-        hls.on(Hls.Events.ERROR, (_, data) => {
+        hls.on(Hls.Events.ERROR, (_: any, data: any) => {
           if (data.fatal) {
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               setExactErrorMsg(`Network Error: ${data.details}. The server refused the connection or CORS is blocking it.`);
@@ -356,14 +356,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           const scheme = match[1];
           const path = match[2];
           const safeName = channelName || 'Live Channel';
-          // THE FIX: Perfect Intent URI structure to force OS player choice
           targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(safeName)};end;`;
         }
       } else {
         targetUrl = `vlc://${streamUrl}`;
       }
       
-      // THE FIX: Directly change window location instead of using dummy 'a' tag
       window.location.href = targetUrl;
     } catch (error: any) {
       console.error("External Player Launch Error:", error);
