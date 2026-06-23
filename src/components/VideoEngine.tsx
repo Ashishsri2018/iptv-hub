@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
-import { API_URL } from '../config';
-import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles, WifiOff, X, RefreshCw } from 'lucide-react';
+import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles, WifiOff, RefreshCw } from 'lucide-react';
 import { useAppStore } from '../store';
 
-interface VideoPlayerProps {
+interface VideoEngineProps {
   streamUrl: string;
 }
 
-export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
-  const { channelName, setPlayingChannel } = useAppStore();
+export default function VideoEngine({ streamUrl }: VideoEngineProps) {
+  const { channelName, settings } = useAppStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -66,16 +65,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   }, [streamUrl]);
 
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      if (!document.fullscreenElement) {
-        try { (window.screen.orientation as any).unlock(); } catch (err) {}
-      }
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  }, []);
-
-  useEffect(() => {
     const handleOffline = () => {
       setErrorUI({
         title: "Connection Lost",
@@ -120,7 +109,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       if (watchdogTimer) clearTimeout(watchdogTimer);
     };
 
-        // 15-SECOND STUCK STREAM WATCHDOG
+    // 15-SECOND STUCK STREAM WATCHDOG
     watchdogTimer = setTimeout(() => {
       if (isMounted && videoRef.current && (videoRef.current.readyState < 3 || videoRef.current.paused)) {
         setErrorUI({
@@ -133,7 +122,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         if (hlsRef.current) hlsRef.current.destroy();
       }
     }, 15000);
-
 
     const handleNativePlay = () => setIsPlaying(true);
     const handleNativePause = () => setIsPlaying(false);
@@ -172,7 +160,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       setHasFatalError(true);
     };
 
-    // ALWAYS ATTACH NATIVE ERROR LISTENER
     video.addEventListener('play', handleNativePlay);
     video.addEventListener('pause', handleNativePause);
     video.addEventListener('waiting', handleNativeWaiting);
@@ -182,7 +169,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     video.addEventListener('loadedmetadata', handleNativeMeta);
     video.addEventListener('error', handleNativeError);
 
-        const initializePlayer = () => {
+    const initializePlayer = () => {
       // MIXED CONTENT TRAP: Catch HTTPS apps trying to load HTTP streams
       if (window.location.protocol === 'https:' && streamUrl.startsWith('http://')) {
         clearWatchdog();
@@ -198,7 +185,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
       if (!streamUrl.startsWith('http')) {
         clearWatchdog();
-
         setErrorUI({
           title: "External Protocol",
           desc: "This stream uses a special protocol and must be opened in an external player.",
@@ -209,25 +195,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         return;
       }
 
-      let defaultQuality = 'auto';
-      let defaultAudio = '';
-      let defaultSubtitle = '';
-
-      try {
-        const res = await fetch(`${API_URL}/api/settings`, { signal: abortController.signal });
-        if (res.ok) {
-          const data = await res.json();
-          defaultQuality = data.default_quality || 'auto';
-          defaultAudio = data.default_audio || '';
-          defaultSubtitle = data.default_subtitle || '';
-        }
-      } catch (e: any) { 
-        if (e.name !== 'AbortError') console.error("Settings Fetch Error:", e); 
-      }
-
       if (!isMounted) return;
 
-      // Identify direct media files (.mkv, .mp4, .ts, etc) to bypass HLS.js
       const isDirectMedia = !!streamUrl.match(/\.(mp4|mkv|webm|avi|mov|flv|wmv|ts)(\?|$)/i);
 
       if (Hls.isSupported() && !isDirectMedia) {
@@ -245,10 +214,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           
           if (tracks.length > 0) {
             let targetIdx = -1;
-            if (defaultSubtitle) {
+            if (settings.default_subtitle) {
               targetIdx = tracks.findIndex(t => 
-                t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
-                t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
+                t.name?.toLowerCase().includes(settings.default_subtitle.toLowerCase()) || 
+                t.lang?.toLowerCase().includes(settings.default_subtitle.toLowerCase())
               );
             }
             hls.subtitleTrack = targetIdx;
@@ -263,8 +232,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           
           let targetLevel = -1; 
           if (data.levels && data.levels.length > 0) {
-            if (defaultQuality === 'high') targetLevel = data.levels.length - 1;
-            else if (defaultQuality === 'low') targetLevel = 0;
+            if (settings.default_quality === 'high') targetLevel = data.levels.length - 1;
+            else if (settings.default_quality === 'low') targetLevel = 0;
           }
 
           if (targetLevel !== -1) {
@@ -276,10 +245,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
           if (hls.audioTracks && hls.audioTracks.length > 0) {
             setAudioTracks(hls.audioTracks);
-            if (defaultAudio) {
+            if (settings.default_audio) {
               const idx = hls.audioTracks.findIndex(t => 
-                t.name?.toLowerCase().includes(defaultAudio.toLowerCase()) || 
-                t.lang?.toLowerCase().includes(defaultAudio.toLowerCase())
+                t.name?.toLowerCase().includes(settings.default_audio.toLowerCase()) || 
+                t.lang?.toLowerCase().includes(settings.default_audio.toLowerCase())
               );
               if (idx !== -1) {
                 hls.audioTrack = idx;
@@ -305,10 +274,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event, data) => {
           const tracks = data.audioTracks || [];
           setAudioTracks(tracks);
-          if (defaultAudio && !initialAudioSet && tracks.length > 0) {
+          if (settings.default_audio && !initialAudioSet && tracks.length > 0) {
             const idx = tracks.findIndex((t: any) => 
-              t.name?.toLowerCase().includes(defaultAudio.toLowerCase()) || 
-              t.lang?.toLowerCase().includes(defaultAudio.toLowerCase())
+              t.name?.toLowerCase().includes(settings.default_audio.toLowerCase()) || 
+              t.lang?.toLowerCase().includes(settings.default_audio.toLowerCase())
             );
             if (idx !== -1) {
               hls.audioTrack = idx;
@@ -322,11 +291,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           processSubtitles(data.subtitleTracks || []);
         });
 
-                let internalNetworkRetries = 0;
+        let internalNetworkRetries = 0;
         let mediaRecoveryAttempts = 0;
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
-          // Explicit trap for Manifest Parse Errors
           if (data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR) {
             clearWatchdog();
             setErrorUI({ title: "Incompatible Stream", desc: "This stream format cannot be read natively. Try opening it in an external player.", raw: data.details });
@@ -357,12 +325,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               setHasFatalError(true);
               hls.destroy();
             }
-                        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               if (mediaRecoveryAttempts < 2) {
                 mediaRecoveryAttempts++;
                 hls.recoverMediaError();
               } else {
-                clearWatchdog();
                 setErrorUI({ 
                   title: "Codec Unsupported", 
                   desc: "This stream uses an incompatible video/audio codec for this browser. Try opening it in an external player.", 
@@ -372,7 +339,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                 hls.destroy();
               }
             }
-
             else {
               if (data.details === 'levelSwitchError' || data.details === 'levelLoadError') {
                 hls.currentLevel = -1;
@@ -387,9 +353,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         });
       } 
       else {
-        // Fallback Native Routing (for Safari and Direct Media)
         video.src = streamUrl;
-        video.load(); // Force the native pipeline to evaluate and throw native error if bad
+        video.load(); 
       }
     };
 
@@ -422,7 +387,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       video.removeAttribute('src'); 
       video.load();
     };
-  }, [streamUrl, retryCount]);
+  }, [streamUrl, retryCount, settings]);
 
   // ==========================================
   // CONTROLS & MENUS
@@ -649,43 +614,22 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       )}
 
       {hasFatalError && (
-        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10] text-center p-6 animate-in fade-in duration-300">
-          
-          <button 
-            onClick={() => setPlayingChannel('', '', null)}
-            className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-full transition-colors z-50"
-            title="Close Player"
-          >
-            <X size={20} />
-          </button>
-
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10]/95 backdrop-blur-sm text-center p-6 animate-in fade-in duration-300">
           {errorUI.title === "No Internet Connection" || errorUI.title === "Connection Lost" ? (
             <WifiOff size={64} className="text-red-500 mb-5 drop-shadow-[0_0_15px_rgba(239,68,68,0.3)]" />
           ) : (
             <AlertTriangle size={64} className="text-yellow-500 mb-5 drop-shadow-[0_0_15px_rgba(234,179,8,0.3)]" />
           )}
-          
-          <h3 className="text-2xl font-bold text-white mb-2 tracking-wide">{errorUI.title}</h3>
-          <p className="text-slate-300 mb-6 max-w-md text-sm sm:text-base leading-relaxed">
-            {errorUI.desc}
-          </p>
-          
-          <div className="bg-black/50 border border-slate-800/50 rounded-lg p-3.5 mb-8 w-full max-w-lg shadow-inner">
+          <h3 className="text-2xl font-bold text-white mb-2">{errorUI.title}</h3>
+          <p className="text-slate-300 mb-6 max-w-md text-sm">{errorUI.desc}</p>
+          <div className="bg-black/50 border border-slate-800/50 rounded-lg p-3.5 mb-8 w-full max-w-lg">
             <p className="text-red-400 font-mono text-xs break-all text-left">{errorUI.raw}</p>
           </div>
-          
-          <div className="flex flex-col sm:flex-row items-center gap-4 w-full sm:w-auto max-w-sm">
-            <button 
-              onClick={handleRetry} 
-              className="px-6 py-3.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-all shadow-[0_0_20px_rgba(0,0,0,0.3)] hover:scale-105 active:scale-95 border border-slate-700 w-full sm:w-auto justify-center"
-            >
-              <RefreshCw size={20} /> Retry Connection
+          <div className="flex flex-col sm:flex-row items-center gap-4 w-full sm:w-auto">
+            <button onClick={handleRetry} className="px-6 py-3.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-lg flex items-center justify-center gap-3 border border-slate-700 w-full sm:w-auto">
+              <RefreshCw size={20} /> Retry
             </button>
-
-            <button 
-              onClick={launchExternalPlayer} 
-              className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-all shadow-[0_0_20px_rgba(37,99,235,0.3)] hover:scale-105 active:scale-95 w-full sm:w-auto justify-center"
-            >
+            <button onClick={launchExternalPlayer} className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center justify-center gap-3 w-full sm:w-auto">
               <ExternalLink size={20} /> Open External
             </button>
           </div>
@@ -703,7 +647,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               <button onClick={togglePlay} className="text-white hover:text-blue-400 transition-colors">
                 {isPlaying ? <Pause size={24} className="fill-current" /> : <Play size={24} className="fill-current" />}
               </button>
-
               <div className="flex items-center gap-2 group/volume">
                 <button onClick={toggleMute} className="text-white hover:text-blue-400 transition-colors">
                   {isMuted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
@@ -713,21 +656,19 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                   className="w-0 sm:w-20 opacity-0 sm:opacity-100 group-hover/volume:w-20 group-hover/volume:opacity-100 transition-all accent-blue-500 h-1 cursor-pointer"
                 />
               </div>
-
               {isLive ? (
-                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-red-600/20 border border-red-600/50 select-none">
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-red-600/20 border border-red-600/50">
                   <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
                   <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Live</span>
                 </div>
               ) : (
-                <div className="flex items-center gap-1 text-sm font-medium text-slate-300 font-mono tracking-tight select-none">
+                <div className="flex items-center gap-1 text-sm font-medium text-slate-300 font-mono">
                   <span>{currentTimeDisplay}</span><span className="text-slate-500">/</span><span>{durationDisplay}</span>
                 </div>
               )}
             </div>
 
             <div className="flex items-center gap-4 sm:gap-5 relative">
-              
               {subtitleTracks.length > 0 && (
                 <div className="relative">
                   <button onClick={(e) => { e.stopPropagation(); toggleMenu('subtitles'); }} className={`transition-colors ${activeMenu === 'subtitles' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
@@ -775,12 +716,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                   {activeMenu === 'quality' && (
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Quality</span></div>
-                      
                       <button onClick={() => changeQuality(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
                         Auto {currentLevel === -1 && autoLevel !== -1 && levels[autoLevel]?.height ? `(${levels[autoLevel].height}p)` : ''} 
                         {currentLevel === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
                       </button>
-
                       {levels.map((level, idx) => (
                         <button key={idx} onClick={() => changeQuality(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
                           {level.height ? `${level.height}p` : `Level ${idx + 1}`} {currentLevel === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
