@@ -26,7 +26,7 @@ export default function Channels() {
   const [activeSourceId, setActiveSourceId] = useState('All');
   const [activeCategory, setActiveCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [submittedSearch, setSubmittedSearch] = useState(''); // REPLACED DEBOUNCE
   
   // Pagination, Touch, Error & Toast States
   const [isLoading, setIsLoading] = useState(false);
@@ -106,19 +106,12 @@ export default function Channels() {
     }
   }, [activeSourceId]);
 
-  // 3. Debounce Search
-  useEffect(() => {
-    const handler = setTimeout(() => {
-      setDebouncedSearch(searchQuery);
-    }, 500);
-    return () => clearTimeout(handler);
-  }, [searchQuery]);
-
+  // 3. Keep engine synced with selections and SUBMITTED search
   useEffect(() => {
     engineRefs.current.sourceId = activeSourceId;
     engineRefs.current.category = activeCategory;
-    engineRefs.current.search = debouncedSearch;
-  }, [activeSourceId, activeCategory, debouncedSearch]);
+    engineRefs.current.search = submittedSearch;
+  }, [activeSourceId, activeCategory, submittedSearch]);
 
   // 4. Fetch Channels
   const loadMoreChannels = useCallback(async (reset = false) => {
@@ -137,7 +130,12 @@ export default function Channels() {
       url.searchParams.append('offset', engine.offset.toString());
       if (engine.sourceId !== 'All') url.searchParams.append('sourceId', engine.sourceId);
       if (engine.category !== 'All') url.searchParams.append('category', engine.category);
-      if (engine.search.trim() !== '') url.searchParams.append('search', engine.search.trim());
+      
+      // MULTI-WORD SEARCH FIX: Convert spaces to SQL wildcard '%'
+      if (engine.search.trim() !== '') {
+        const backendSearchTerm = engine.search.trim().replace(/\s+/g, '%');
+        url.searchParams.append('search', backendSearchTerm);
+      }
 
       const response = await fetch(url.toString());
       if (!response.ok) throw new Error(`Server returned ${response.status}`);
@@ -148,10 +146,16 @@ export default function Channels() {
         let filtered = data;
         if (engine.sourceId !== 'All') filtered = filtered.filter(c => c.source_id === engine.sourceId);
         if (engine.category !== 'All') filtered = filtered.filter(c => c.channel_group === engine.category);
+        
+        // MULTI-WORD SEARCH FIX (Client-side fallback)
         if (engine.search.trim() !== '') {
-          const s = engine.search.toLowerCase();
-          filtered = filtered.filter(c => c.name?.toLowerCase().includes(s));
+          const searchTerms = engine.search.toLowerCase().split(/\s+/).filter(Boolean);
+          filtered = filtered.filter(c => {
+            const nameLower = c.name?.toLowerCase() || '';
+            return searchTerms.every(term => nameLower.includes(term));
+          });
         }
+        
         const chunk = filtered.slice(engine.offset, engine.offset + 100);
         setChannels(prev => reset ? chunk : [...prev, ...chunk]);
         engine.hasMore = engine.offset + 100 < filtered.length;
@@ -173,7 +177,25 @@ export default function Channels() {
   useEffect(() => {
     setChannels([]); 
     loadMoreChannels(true);
-  }, [activeSourceId, activeCategory, debouncedSearch, loadMoreChannels]);
+  }, [activeSourceId, activeCategory, submittedSearch, loadMoreChannels]);
+
+  // ==========================================
+  // SEARCH ACTIONS
+  // ==========================================
+  const handleSearchSubmit = () => {
+    setSubmittedSearch(searchQuery);
+  };
+
+  const handleClearSearch = () => {
+    setSearchQuery('');
+    setSubmittedSearch('');
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      handleSearchSubmit();
+    }
+  };
 
   // ==========================================
   // CARD ACTIONS
@@ -188,6 +210,7 @@ export default function Channels() {
 
   const handleTouchStart = (url: string) => {
     setIsLongPress(false);
+    // LONG PRESS FIX: Reduced to 800ms
     pressTimer.current = window.setTimeout(() => {
       navigator.clipboard.writeText(url).then(() => {
         setIsLongPress(true);
@@ -196,7 +219,7 @@ export default function Channels() {
       }).catch(err => {
         handleError("Failed to copy link", err);
       });
-    }, 2000);
+    }, 800);
   };
 
   const handleTouchEnd = () => {
@@ -246,7 +269,12 @@ export default function Channels() {
   };
 
   const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'this playlist';
-  const isSearching = debouncedSearch.trim() !== '';
+  const isSearching = submittedSearch.trim() !== '';
+
+  // PLAYLIST SORTING FIX: Alphanumeric
+  const sortedSources = [...sources].sort((a, b) => 
+    a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+  );
 
   return (
     <div className="h-full flex flex-col max-w-7xl mx-auto py-4 sm:py-6 relative overflow-hidden bg-[#0f1115]">
@@ -286,15 +314,33 @@ export default function Channels() {
           <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
             <Tv2 className="text-blue-500" /> Channels
           </h1>
-          <div className="relative w-full">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <div className="relative w-full flex items-center">
+            {/* Clickable Search Icon */}
+            <button 
+              onClick={handleSearchSubmit}
+              className="absolute left-2 p-1.5 text-slate-400 hover:text-white transition-colors rounded-full hover:bg-slate-800"
+            >
+              <Search size={18} />
+            </button>
+            
             <input
               type="text"
-              placeholder={`Search in ${activeSourceName}...`}
+              placeholder={`Search in ${activeSourceName}... (Press Enter)`}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-[#1e232d] border border-slate-700/50 rounded-full pl-10 pr-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-all"
+              onKeyDown={handleKeyDown}
+              className="w-full bg-[#1e232d] border border-slate-700/50 rounded-full pl-10 pr-10 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-all shadow-inner"
             />
+            
+            {/* Clickable Clear X Icon */}
+            {searchQuery && (
+              <button 
+                onClick={handleClearSearch} 
+                className="absolute right-3 p-1.5 text-slate-400 hover:text-white transition-colors bg-slate-800 hover:bg-slate-700 rounded-full"
+              >
+                <X size={14} />
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -315,7 +361,7 @@ export default function Channels() {
       {/* PLAYLIST TABS (Horizontal Scroll) */}
       <div className="px-4 sm:px-6 mb-2 shrink-0">
         <div className="flex overflow-x-auto pb-3 gap-2 hide-scroll border-b border-slate-800/50">
-          {sources.length > 1 && (
+          {sortedSources.length > 1 && (
             <button
               onClick={() => setActiveSourceId('All')}
               className={`whitespace-nowrap px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
@@ -324,7 +370,7 @@ export default function Channels() {
               <Folder size={16} /> All Playlists
             </button>
           )}
-          {sources.map((src) => (
+          {sortedSources.map((src) => (
             <button
               key={src.id}
               onClick={() => setActiveSourceId(src.id)}
@@ -339,7 +385,7 @@ export default function Channels() {
 
       {isSearching && (
         <div className="px-4 sm:px-6 mb-2 text-sm text-blue-400 font-medium shrink-0">
-          Showing results for "{debouncedSearch}"...
+          Showing results for "{submittedSearch}"...
         </div>
       )}
 
@@ -384,7 +430,6 @@ export default function Channels() {
                   onClick={(e) => handleCardClick(e, channel)}
                   onTouchStart={() => handleTouchStart(channel.stream_url)}
                   onTouchEnd={handleTouchEnd}
-                  onTouchMove={handleTouchEnd}
                   onMouseDown={() => handleTouchStart(channel.stream_url)}
                   onMouseUp={handleTouchEnd}
                   onMouseLeave={handleTouchEnd}
