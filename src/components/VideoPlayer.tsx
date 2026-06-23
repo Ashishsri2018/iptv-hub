@@ -36,7 +36,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const [levels, setLevels] = useState<any[]>([]);
   const [currentLevel, setCurrentLevel] = useState<number>(-1);
-  const [autoLevel, setAutoLevel] = useState<number>(-1); // Tracks actual playing level when in Auto
+  const [autoLevel, setAutoLevel] = useState<number>(-1); 
 
   const [audioTracks, setAudioTracks] = useState<any[]>([]);
   const [currentAudioTrack, setCurrentAudioTrack] = useState<number>(-1);
@@ -120,17 +120,28 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.loadSource(streamUrl);
         hls.attachMedia(video);
 
+        let initialAudioSet = false;
+        let initialSubSet = false;
+
         hls.on(Hls.Events.MANIFEST_PARSED, (_: any, data: any) => {
           setLevels(data.levels);
+          
+          // FORCE QUALITY PREFERENCE ON START
           let targetLevel = -1; 
-          if (data.levels.length > 1) {
+          if (data.levels.length > 0) {
             if (defaultQuality === 'high') targetLevel = data.levels.length - 1;
             else if (defaultQuality === 'low') targetLevel = 0;
           }
-          hls.currentLevel = targetLevel;
+
+          if (targetLevel !== -1) {
+            hls.startLevel = targetLevel;
+            hls.nextLoadLevel = targetLevel;
+            hls.currentLevel = targetLevel; 
+          }
           setCurrentLevel(targetLevel);
 
-          if (hls.audioTracks && hls.audioTracks.length > 1) {
+          // TRY TO SET AUDIO PREFERENCE
+          if (hls.audioTracks && hls.audioTracks.length > 0) {
             setAudioTracks(hls.audioTracks);
             if (defaultAudio) {
               const idx = hls.audioTracks.findIndex(t => 
@@ -140,14 +151,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               if (idx !== -1) {
                 hls.audioTrack = idx;
                 setCurrentAudioTrack(idx);
-              } else {
-                setCurrentAudioTrack(hls.audioTrack); 
+                initialAudioSet = true;
               }
-            } else {
-              setCurrentAudioTrack(hls.audioTrack);
             }
+            if (!initialAudioSet) setCurrentAudioTrack(hls.audioTrack);
           }
 
+          // TRY TO SET SUBTITLE PREFERENCE
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
             setSubtitleTracks(hls.subtitleTracks);
             if (defaultSubtitle) {
@@ -158,33 +168,58 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               if (idx !== -1) {
                 hls.subtitleTrack = idx;
                 setCurrentSubtitleTrack(idx);
-              } else {
-                setCurrentSubtitleTrack(-1); 
+                initialSubSet = true;
               }
-            } else {
-              setCurrentSubtitleTrack(-1); 
             }
+            if (!initialSubSet) setCurrentSubtitleTrack(-1);
           }
 
           setIsBuffering(false);
-          video.play().catch(e => {
-            console.error("Autoplay Error:", e);
-            setIsPlaying(false);
-          });
+          video.play().catch(() => setIsPlaying(false));
         });
 
-        // TRACK ACTUAL AUTO QUALITY LEVEL
+        // DYNAMIC QUALITY TRACKING
         if ((Hls.Events as any).LEVEL_SWITCHED) {
           hls.on((Hls.Events as any).LEVEL_SWITCHED, (_: any, data: any) => {
             setAutoLevel(data.level);
           });
         }
 
+        // FALLBACK: DELAYED TRACK METADATA DETECTION
         if ((Hls.Events as any).AUDIO_TRACKS_UPDATED) {
-          hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_: any, data: any) => setAudioTracks(data.audioTracks || []));
+          hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_: any, data: any) => {
+            const tracks = data.audioTracks || [];
+            setAudioTracks(tracks);
+            if (defaultAudio && !initialAudioSet && tracks.length > 0) {
+              const idx = tracks.findIndex((t: any) => 
+                t.name?.toLowerCase().includes(defaultAudio.toLowerCase()) || 
+                t.lang?.toLowerCase().includes(defaultAudio.toLowerCase())
+              );
+              if (idx !== -1) {
+                hls.audioTrack = idx;
+                setCurrentAudioTrack(idx);
+                initialAudioSet = true;
+              }
+            }
+          });
         }
+
         if ((Hls.Events as any).SUBTITLE_TRACKS_UPDATED) {
-          hls.on((Hls.Events as any).SUBTITLE_TRACKS_UPDATED, (_: any, data: any) => setSubtitleTracks(data.subtitleTracks || []));
+          hls.on((Hls.Events as any).SUBTITLE_TRACKS_UPDATED, (_: any, data: any) => {
+            const tracks = data.subtitleTracks || [];
+            setSubtitleTracks(tracks);
+            if (defaultSubtitle && !initialSubSet && tracks.length > 0) {
+              const idx = tracks.findIndex((t: any) => 
+                t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
+                t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
+              );
+              if (idx !== -1) {
+                hls.subtitleTrack = idx;
+                setCurrentSubtitleTrack(idx);
+                initialSubSet = true;
+              }
+            }
+          });
         }
 
         hls.on(Hls.Events.ERROR, (_: any, data: any) => {
@@ -322,7 +357,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       videoRef.current.muted = nextMuted;
       setIsMuted(nextMuted);
       
-      // If unmuting and slider was at 0, bump it up so we hear sound
       if (!nextMuted && volume === 0) {
         setVolume(0.5);
         videoRef.current.volume = 0.5;
@@ -529,7 +563,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Quality</span></div>
                       
-                      {/* DYNAMIC AUTO LABEL FIX */}
                       <button onClick={() => changeQuality(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
                         Auto {currentLevel === -1 && autoLevel !== -1 && levels[autoLevel]?.height ? `(${levels[autoLevel].height}p)` : ''} 
                         {currentLevel === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
