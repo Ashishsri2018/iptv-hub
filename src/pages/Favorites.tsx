@@ -18,7 +18,7 @@ export default function Favorites() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   
-  // NEW: View Mode State
+  // View Mode State
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   
   const [toast, setToast] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
@@ -105,10 +105,15 @@ export default function Favorites() {
     }
   };
 
+  // SEARCH FIX: Clean trailing spaces and handle multi-word perfectly
   const searchResults = useMemo(() => {
-    if (!searchQuery) return favorites;
+    const cleanQuery = searchQuery.trim();
+    if (!cleanQuery) return favorites;
+    
     const fuse = new Fuse(favorites, { keys: ['name', 'source_name'], threshold: 0.3, useExtendedSearch: true });
-    const formattedQuery = searchQuery.split(' ').map(word => `'${word}`).join(' ');
+    
+    // Split by any number of spaces, map to Fuse.js exact-match format
+    const formattedQuery = cleanQuery.split(/\s+/).map(word => `'${word}`).join(' ');
     return fuse.search(formattedQuery).map(res => res.item);
   }, [favorites, searchQuery]);
 
@@ -170,7 +175,7 @@ export default function Favorites() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 custom-scrollbar select-none">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 custom-scrollbar select-none" style={{ WebkitOverflowScrolling: 'touch' }}>
         <div className="max-w-7xl mx-auto pb-32">
           {groupedFavorites.length === 0 ? (
             <div className="text-center mt-20 text-slate-500">
@@ -184,7 +189,6 @@ export default function Favorites() {
                 
                 {/* DYNAMIC RENDER BASED ON VIEW MODE */}
                 <div className={viewMode === 'grid' 
-                  // INCREASED COLUMNS AND REDUCED GAP FOR SMALLER TILES
                   ? "grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2 sm:gap-3" 
                   : "space-y-2 sm:space-y-3"
                 }>
@@ -209,7 +213,6 @@ export default function Favorites() {
                           }}
                           className="bg-[#12141a] border border-slate-800/60 rounded-xl overflow-hidden hover:border-blue-500/50 hover:shadow-[0_0_15px_rgba(59,130,246,0.15)] transition-all cursor-pointer group flex flex-col relative"
                         >
-                          {/* SMALLER ACTION ICONS */}
                           <div className="absolute top-1 right-1 z-10 flex gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                             <button
                               onClick={(e) => launchExternalPlayer(e, channel.stream_url, channel.name)}
@@ -225,12 +228,13 @@ export default function Favorites() {
                             </button>
                           </div>
 
-                          {/* SMALLER IMAGE CONTAINER */}
                           <div className="aspect-video bg-[#0b0c10] relative flex items-center justify-center p-2">
                             {channel.logo_url ? (
                               <img 
                                 src={channel.logo_url} 
                                 alt={channel.name} 
+                                loading="lazy"
+                                decoding="async"
                                 className="max-h-full max-w-full object-contain pointer-events-none drop-shadow-lg group-hover:scale-110 transition-transform duration-300"
                                 onError={(e) => {
                                   (e.target as HTMLImageElement).style.display = 'none';
@@ -251,7 +255,6 @@ export default function Favorites() {
                             </div>
                           </div>
                           
-                          {/* SMALLER TEXT CONTAINER */}
                           <div className="p-2 border-t border-slate-800/50 flex-1 flex flex-col justify-between">
                             <h3 className="text-slate-200 font-medium text-xs line-clamp-2 leading-tight group-hover:text-blue-400 transition-colors">
                               {channel.name}
@@ -265,7 +268,7 @@ export default function Favorites() {
                     }
 
                     // ==========================================
-                    // LIST VIEW ROW (Kept Identical)
+                    // LIST VIEW ROW
                     // ==========================================
                     return (
                       <div 
@@ -287,7 +290,8 @@ export default function Favorites() {
                               <img 
                                 src={channel.logo_url} 
                                 alt="" 
-                                loading="lazy" 
+                                loading="lazy"
+                                decoding="async" 
                                 className="w-full h-full object-contain pointer-events-none p-1" 
                                 onError={(e) => { 
                                   (e.target as HTMLImageElement).style.display = 'none'; 
@@ -346,7 +350,7 @@ export default function Favorites() {
 
       {/* ERROR / SUCCESS TOAST */}
       {toast && (
-        <div className={`absolute bottom-8 left-1/2 -translate-x-1/2 text-white px-6 py-3 rounded-full shadow-[0_10px_40px_rgba(0,0,0,0.5)] flex items-center gap-2 font-medium animate-in slide-in-from-bottom-5 fade-in z-50 border ${toast.type === 'error' ? 'bg-red-900/95 border-red-700' : 'bg-slate-800/95 border-slate-700'}`}>
+        <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 text-white px-6 py-3 rounded-full shadow-[0_10px_40px_rgba(0,0,0,0.5)] flex items-center gap-2 font-medium animate-in slide-in-from-bottom-5 fade-in z-[100] border ${toast.type === 'error' ? 'bg-red-900/95 border-red-700' : 'bg-slate-800/95 border-slate-700'}`}>
           {toast.type === 'success' ? <CheckCircle size={18} className="text-green-400 shrink-0" /> : <AlertCircle size={18} className="text-red-400 shrink-0" />}
           <span className="truncate max-w-[250px] text-sm">{toast.msg}</span>
         </div>
