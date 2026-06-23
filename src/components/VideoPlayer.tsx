@@ -285,7 +285,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               hls.recoverMediaError();
             }
             else {
-              // GRACEFUL RECOVERY: If the level switch fails, catch it and force Auto ABR
               if (data.details === 'levelSwitchError' || data.details === 'levelLoadError') {
                 console.warn(`HLS intercepted ${data.details}. Forcing fallback to Auto mode.`);
                 hls.currentLevel = -1;
@@ -350,7 +349,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
-      // PROPER FIX: Just set currentLevel. HLS.js internal engine handles everything else.
       hlsRef.current.currentLevel = levelIndex;
       setCurrentLevel(levelIndex);
       setActiveMenu(null);
@@ -524,7 +522,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         ref={videoRef}
         autoPlay
         playsInline
-        className={`w-full h-full object-contain ${hasFatalError ? 'hidden' : ''}`}
+        style={{ backgroundColor: 'black' }}
+        className={`w-full h-full object-contain bg-black ${hasFatalError ? 'hidden' : ''}`}
         onTimeUpdate={handleTimeUpdate}
         onWaiting={() => setIsBuffering(true)}
         onPlaying={() => setIsBuffering(false)}
