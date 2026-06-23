@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { API_URL } from '../config';
-import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles } from 'lucide-react';
+import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles, WifiOff, X } from 'lucide-react';
 import { useAppStore } from '../store';
 
 interface VideoPlayerProps {
@@ -9,7 +9,8 @@ interface VideoPlayerProps {
 }
 
 export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
-  const { channelName } = useAppStore();
+  // Added setPlayingChannel so we can close the player from the error screen
+  const { channelName, setPlayingChannel } = useAppStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -20,7 +21,9 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [isMuted, setIsMuted] = useState(false);
   
   const [hasFatalError, setHasFatalError] = useState(false);
-  const [exactErrorMsg, setExactErrorMsg] = useState("");
+  
+  // DYNAMIC ERROR STATE
+  const [errorUI, setErrorUI] = useState({ title: '', desc: '', raw: '' });
   
   const [progress, setProgress] = useState(0);
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState("00:00");
@@ -63,9 +66,25 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
+  // REAL-TIME INTERNET CONNECTION LISTENER
+  useEffect(() => {
+    const handleOffline = () => {
+      setErrorUI({
+        title: "Connection Lost",
+        desc: "Your internet connection dropped while playing the stream. Please check your Wi-Fi or cellular data.",
+        raw: "ERR_INTERNET_DISCONNECTED"
+      });
+      setHasFatalError(true);
+      setIsBuffering(false);
+    };
+
+    window.addEventListener('offline', handleOffline);
+    return () => window.removeEventListener('offline', handleOffline);
+  }, []);
+
   useEffect(() => {
     setHasFatalError(false);
-    setExactErrorMsg("");
+    setErrorUI({ title: '', desc: '', raw: '' });
     setActiveMenu(null);
     setAutoLevel(-1);
     activeMenuRef.current = null;
@@ -126,7 +145,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.on(Hls.Events.MANIFEST_PARSED, (_: any, data: any) => {
           setLevels(data.levels);
           
-          // FORCE QUALITY PREFERENCE ON START
           let targetLevel = -1; 
           if (data.levels.length > 0) {
             if (defaultQuality === 'high') targetLevel = data.levels.length - 1;
@@ -140,7 +158,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           }
           setCurrentLevel(targetLevel);
 
-          // TRY TO SET AUDIO PREFERENCE
           if (hls.audioTracks && hls.audioTracks.length > 0) {
             setAudioTracks(hls.audioTracks);
             if (defaultAudio) {
@@ -157,7 +174,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             if (!initialAudioSet) setCurrentAudioTrack(hls.audioTrack);
           }
 
-          // TRY TO SET SUBTITLE PREFERENCE
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
             setSubtitleTracks(hls.subtitleTracks);
             if (defaultSubtitle) {
@@ -178,14 +194,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           video.play().catch(() => setIsPlaying(false));
         });
 
-        // DYNAMIC QUALITY TRACKING
         if ((Hls.Events as any).LEVEL_SWITCHED) {
           hls.on((Hls.Events as any).LEVEL_SWITCHED, (_: any, data: any) => {
             setAutoLevel(data.level);
           });
         }
 
-        // FALLBACK: DELAYED TRACK METADATA DETECTION
         if ((Hls.Events as any).AUDIO_TRACKS_UPDATED) {
           hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_: any, data: any) => {
             const tracks = data.audioTracks || [];
@@ -222,20 +236,45 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           });
         }
 
+        // INTELLIGENT ERROR PARSING
         hls.on(Hls.Events.ERROR, (_: any, data: any) => {
           if (data.fatal) {
-            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              setExactErrorMsg(`Network Error: ${data.details}. The server refused the connection or CORS is blocking it.`);
+            setIsBuffering(false);
+            
+            // 1. Check for physical internet drop first
+            if (!navigator.onLine) {
+              setErrorUI({
+                title: "No Internet Connection",
+                desc: "You appear to be offline. Please check your network connection and try again.",
+                raw: "ERR_INTERNET_DISCONNECTED"
+              });
               setHasFatalError(true);
-              setIsBuffering(false);
+              hls.destroy();
+              return;
             }
+
+            // 2. Identify specific network failures (CORS / 404 / 403)
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              setErrorUI({
+                title: "Connection Refused",
+                desc: "The stream server rejected the request. This is usually caused by strict browser security (CORS) or a dead link.",
+                raw: `Network Error: ${data.details}`
+              });
+              setHasFatalError(true);
+              hls.destroy();
+            }
+            // 3. Attempt to bypass media corruption
             else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls.recoverMediaError();
             }
+            // 4. Catastrophic parsing/format failures
             else {
-              setExactErrorMsg(`Playback Error: ${data.details}`);
+              setErrorUI({
+                title: "Playback Error",
+                desc: "The video format is not supported or the stream data is corrupted.",
+                raw: `Media Error: ${data.details}`
+              });
               setHasFatalError(true);
-              setIsBuffering(false);
               hls.destroy();
             }
           }
@@ -248,9 +287,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           video.play().catch(() => setIsPlaying(false));
         });
         video.addEventListener('error', () => {
-          setExactErrorMsg("Native Browser Error: The media format is unsupported or the connection was rejected.");
-          setHasFatalError(true);
           setIsBuffering(false);
+          if (!navigator.onLine) {
+            setErrorUI({ title: "No Internet Connection", desc: "You are offline.", raw: "ERR_INTERNET_DISCONNECTED" });
+          } else {
+            setErrorUI({ title: "Playback Error", desc: "The media format is unsupported by your browser or the connection failed.", raw: "Native Browser Error (MEDIA_ERR)" });
+          }
+          setHasFatalError(true);
         });
       }
     };
@@ -455,20 +498,40 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         </div>
       )}
 
-      {/* ERROR FALLBACK UI */}
+      {/* INTELLIGENT ERROR UI */}
       {hasFatalError && (
-        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-slate-900/90 text-center p-6 animate-in fade-in duration-300">
-          <AlertTriangle size={56} className="text-yellow-500 mb-4 drop-shadow-lg" />
-          <h3 className="text-2xl font-bold text-white mb-2 tracking-wide">Stream Blocked</h3>
-          <p className="text-slate-300 mb-2 max-w-sm text-sm sm:text-base">
-            Your browser's security settings (CORS) are blocking this stream. Play it natively using an external app like VLC.
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10] text-center p-6 animate-in fade-in duration-300">
+          
+          {/* THE NEW CLOSE BUTTON */}
+          <button 
+            onClick={() => setPlayingChannel('', '', '')}
+            className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-full transition-colors z-50"
+            title="Close Player"
+          >
+            <X size={20} />
+          </button>
+
+          {/* DYNAMIC ICON */}
+          {errorUI.title === "No Internet Connection" || errorUI.title === "Connection Lost" ? (
+            <WifiOff size={64} className="text-red-500 mb-5 drop-shadow-[0_0_15px_rgba(239,68,68,0.3)]" />
+          ) : (
+            <AlertTriangle size={64} className="text-yellow-500 mb-5 drop-shadow-[0_0_15px_rgba(234,179,8,0.3)]" />
+          )}
+          
+          {/* DYNAMIC TEXT */}
+          <h3 className="text-2xl font-bold text-white mb-2 tracking-wide">{errorUI.title}</h3>
+          <p className="text-slate-300 mb-6 max-w-md text-sm sm:text-base leading-relaxed">
+            {errorUI.desc}
           </p>
-          <div className="bg-black/50 border border-red-900/50 rounded p-3 mb-8 w-full max-w-md">
-            <p className="text-red-400 font-mono text-xs break-all text-left">{exactErrorMsg}</p>
+          
+          {/* TECHNICAL DETAILS */}
+          <div className="bg-black/50 border border-slate-800/50 rounded-lg p-3.5 mb-8 w-full max-w-lg shadow-inner">
+            <p className="text-red-400 font-mono text-xs break-all text-left">{errorUI.raw}</p>
           </div>
+          
           <button 
             onClick={launchExternalPlayer} 
-            className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-colors shadow-xl"
+            className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-all shadow-[0_0_20px_rgba(37,99,235,0.3)] hover:scale-105 active:scale-95"
           >
             <ExternalLink size={20} /> Open in External Player
           </button>
