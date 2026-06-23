@@ -1,21 +1,62 @@
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "*", // Keep * for IPTV so mobile apps/browsers don't get blocked, but secure the endpoints below.
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-function generateSafeId(sourceId, url, count) {
-  let hash = 5381;
-  for (let i = 0; i < url.length; i++) hash = (hash * 33) ^ url.charCodeAt(i);
-  const hashStr = (hash >>> 0).toString(36);
-  const tail = url.replace(/[^a-zA-Z0-9]/g, '').slice(-15);
-  return `${sourceId}_${hashStr}_${tail}_${count}`;
+// ----------------------------------------------------
+// SECURITY & VALIDATION UTILS
+// ----------------------------------------------------
+function validateUrl(target) {
+  if (!target || typeof target !== 'string' || target.length > 5000) {
+    throw new Error("Invalid URL provided.");
+  }
+  try {
+    const u = new URL(target);
+    if (!['http:', 'https:'].includes(u.protocol)) {
+      throw new Error("Invalid protocol. Only HTTP and HTTPS are allowed.");
+    }
+    const host = u.hostname;
+    // SSRF Protection: Block private network traversal
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('10.') || host.startsWith('192.168.') || host.match(/^172\.(1[6-9]|2[0-9]|3[0-1])\./)) {
+      throw new Error("Access to private IP addresses is strictly forbidden.");
+    }
+    return target;
+  } catch (e) {
+    throw new Error(`URL Validation Failed: ${e.message}`);
+  }
 }
 
-async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUrl) {
-  if (channels.length === 0) throw new Error("Parser finished, but found 0 readable channels.");
+// Stable ID Generator (Fixes Favorites breaking on refresh)
+function generateStableId(sourceId, streamUrl, name) {
+  let str = `${streamUrl}_${name}`;
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) hash = (hash * 33) ^ str.charCodeAt(i);
+  return `${sourceId}_${(hash >>> 0).toString(36)}`;
+}
+
+// Safe Fetch Wrapper with 15s Timeout
+async function safeFetch(url, options = {}) {
+  const target = validateUrl(url);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
   
-  // Use ON CONFLICT so background auto-refreshes don't crash when re-syncing an existing source
+  try {
+    const response = await fetch(target, { ...options, signal: controller.signal });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw new Error(error.name === 'AbortError' ? 'Connection timed out after 15 seconds' : error.message);
+  }
+}
+
+// ----------------------------------------------------
+// DATABASE BATCH ENGINE
+// ----------------------------------------------------
+async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUrl) {
+  if (!channels || channels.length === 0) throw new Error("Parser finished, but found 0 readable channels.");
+  
   await env.DB.prepare(`
     INSERT INTO sources (id, name, type, url, channel_count) 
     VALUES (?, ?, ?, ?, 0) 
@@ -45,7 +86,6 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
         else await new Promise(resolve => setTimeout(resolve, 200)); 
       }
     }
-    await new Promise(resolve => setTimeout(resolve, 30)); 
   }
   
   await env.DB.prepare("UPDATE sources SET channel_count = (SELECT COUNT(*) FROM channels WHERE source_id = ?), last_updated = CURRENT_TIMESTAMP WHERE id = ?").bind(sourceId, sourceId).run();
@@ -53,65 +93,41 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
 }
 
 // ----------------------------------------------------
-// UNIVERSAL IMPORT ENGINE (Playlist OR Single Stream)
+// UNIVERSAL IMPORT ENGINE
 // ----------------------------------------------------
 async function processImportUrl(url, sourceId, name) {
   try {
-    const response = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const response = await safeFetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     
     if (!response.ok) {
-      // If the target server blocks the Cloudflare worker (403, 404), do not reject!
-      // The user's browser or VLC player might still be able to play it directly.
-      return [{
-        id: generateSafeId(sourceId, url, 1),
-        source_id: sourceId,
-        name: name || 'Direct Link',
-        channel_group: 'Direct Streams',
-        logo_url: null,
-        stream_url: url
-      }];
+      return [{ id: generateStableId(sourceId, url, name), source_id: sourceId, name: name || 'Direct Link', channel_group: 'Direct Streams', logo_url: null, stream_url: url }];
     }
 
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
     const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+    
+    // Protection: Block > 50MB files from entering RAM
+    if (contentLength > 50000000) {
+      return [{ id: generateStableId(sourceId, url, name), source_id: sourceId, name: name || 'Large Media Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url }];
+    }
+
     const isMedia = contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml';
     const isMpegUrl = contentType.includes('mpegurl');
 
-    // 1. FAST-PATH: Huge files or Explicit Media Files (e.g. .mp4, .mpd)
-    // Avoid downloading large video files into Cloudflare memory. Add instantly as single stream.
-    if ((contentLength > 25000000) || (isMedia && !isMpegUrl)) {
-      return [{
-        id: generateSafeId(sourceId, url, 1),
-        source_id: sourceId,
-        name: name || 'Media Stream',
-        channel_group: 'Direct Streams',
-        logo_url: null,
-        stream_url: url
-      }];
+    if (isMedia && !isMpegUrl) {
+      return [{ id: generateStableId(sourceId, url, name), source_id: sourceId, name: name || 'Media Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url }];
     }
 
-    // 2. PARSE TEXT
     const text = await response.text();
 
-    // 3. HLS STREAM DETECTION (.m3u8 live feeds vs IPTV Playlists)
-    // If it contains TARGETDURATION, it is a single video feed, not a multi-channel playlist.
     if (text.includes('#EXT-X-TARGETDURATION') || text.includes('#EXT-X-STREAM-INF')) {
-      return [{
-        id: generateSafeId(sourceId, url, 1),
-        source_id: sourceId,
-        name: name || 'HLS Stream',
-        channel_group: 'Direct Streams',
-        logo_url: null,
-        stream_url: url
-      }];
+      return [{ id: generateStableId(sourceId, url, name), source_id: sourceId, name: name || 'HLS Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url }];
     }
 
-    // 4. STANDARD M3U PLAYLIST DECODING
     if (text.trimStart().startsWith('#EXTM3U')) {
       const lines = text.split('\n');
       const channels = [];
       let currentChannel = {};
-      const urlCounts = {};
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
@@ -125,8 +141,7 @@ async function processImportUrl(url, sourceId, name) {
         } else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
           currentChannel.stream_url = line;
           currentChannel.source_id = sourceId;
-          urlCounts[line] = (urlCounts[line] || 0) + 1;
-          currentChannel.id = generateSafeId(sourceId, line, urlCounts[line]);
+          currentChannel.id = generateStableId(sourceId, line, currentChannel.name);
           channels.push({ ...currentChannel });
           currentChannel = {};
         }
@@ -134,27 +149,11 @@ async function processImportUrl(url, sourceId, name) {
       if (channels.length > 0) return channels;
     }
 
-    // 5. ULTIMATE FALLBACK: Unknown format (e.g. extensionless URLs, HTML pages)
-    // Assume the user knows what they pasted and try to play it.
-    return [{
-      id: generateSafeId(sourceId, url, 1),
-      source_id: sourceId,
-      name: name || 'Direct Link',
-      channel_group: 'Direct Streams',
-      logo_url: null,
-      stream_url: url
-    }];
+    return [{ id: generateStableId(sourceId, url, name), source_id: sourceId, name: name || 'Direct Link', channel_group: 'Direct Streams', logo_url: null, stream_url: url }];
 
   } catch (err) {
-    // If fetch fully crashes (e.g. bad DNS, CORS error), still save the URL as a channel!
-    return [{
-      id: generateSafeId(sourceId, url, 1),
-      source_id: sourceId,
-      name: name || 'Direct Link',
-      channel_group: 'Direct Streams',
-      logo_url: null,
-      stream_url: url
-    }];
+    console.error(`Import Engine caught error: ${err.message}`);
+    return [{ id: generateStableId(sourceId, url, name), source_id: sourceId, name: name || 'Direct Link', channel_group: 'Direct Streams', logo_url: null, stream_url: url }];
   }
 }
 
@@ -173,11 +172,12 @@ async function runAutoRefresh(env) {
 
     if (hours === 0) return;
 
-    const { results: sources } = await env.DB.prepare(`SELECT * FROM sources WHERE type = 'M3U URL'`).all();
+    // Protection: Cap at 5 sources per run so Cron doesn't exceed Cloudflare CPU limits
+    const { results: sources } = await env.DB.prepare(`SELECT * FROM sources WHERE type = 'M3U URL' ORDER BY last_updated ASC LIMIT 5`).all();
     
     for (const source of sources) {
-      const dateStr = source.last_updated.endsWith('Z') ? source.last_updated : source.last_updated + 'Z';
-      const lastUpdated = new Date(dateStr).getTime();
+      // Protection: Safe Date Parsing
+      const lastUpdated = Date.parse(source.last_updated.endsWith('Z') ? source.last_updated : source.last_updated + 'Z');
       
       if (Date.now() - lastUpdated > hours * 60 * 60 * 1000) {
         try {
@@ -201,9 +201,8 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
     const url = new URL(request.url);
 
-    // "Lazy Cron": Trigger background sync asynchronously without blocking the user's UI
     if (request.method === "GET" && (url.pathname === "/api/channels" || url.pathname === "/api/sources")) {
-      ctx.waitUntil(runAutoRefresh(env).catch(() => {}));
+      ctx.waitUntil(runAutoRefresh(env).catch(e => console.error(e)));
     }
 
     try {
@@ -212,76 +211,76 @@ export default {
         return Response.json(results, { headers: corsHeaders });
       }
 
-      // UNIVERSAL IMPORTER
       if (url.pathname === "/api/sources/import" && request.method === "POST") {
-        const { playlistUrl, name, type } = await request.json();
-        const sourceId = `src_${Date.now()}`;
+        const body = await request.json();
+        if (!body || !body.playlistUrl) throw new Error("Playlist URL is required.");
         
-        // Pass everything through the universal engine
-        const channels = await processImportUrl(playlistUrl, sourceId, name);
-        const count = await insertDatabaseBatch(env, channels, sourceId, name, type, playlistUrl);
+        const sourceId = `src_${crypto.randomUUID()}`; // Security Fix: Prevent ID collisions
+        const channels = await processImportUrl(body.playlistUrl, sourceId, body.name);
+        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, body.type, body.playlistUrl);
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
-      if (url.pathname === "/api/sources/import-bulk" && request.method === "POST") {
-        const { sourceId, name, type, channels: rawChannels } = await request.json();
-        await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, type, url, channel_count) VALUES (?, ?, ?, 'Local Upload', 0)").bind(sourceId, name, type).run();
-        const stmts = rawChannels.map(ch => env.DB.prepare(`INSERT INTO channels (id, source_id, name, channel_group, logo_url, stream_url) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, channel_group = excluded.channel_group, logo_url = excluded.logo_url, stream_url = excluded.stream_url`).bind(ch.id, sourceId, ch.name, ch.channel_group, ch.logo_url, ch.stream_url));
-        for (let i = 0; i < stmts.length; i += 100) { try { await env.DB.batch(stmts.slice(i, i + 100)); } catch(e) {} }
-        await env.DB.prepare("UPDATE sources SET channel_count = (SELECT COUNT(*) FROM channels WHERE source_id = ?), last_updated = CURRENT_TIMESTAMP WHERE id = ?").bind(sourceId, sourceId).run();
-        return Response.json({ success: true }, { headers: corsHeaders });
-      }
-
       if (url.pathname === "/api/sources/import-xtream" && request.method === "POST") {
-        const { serverUrl, username, password, name } = await request.json();
-        const sourceId = `src_${Date.now()}`;
-        const cleanUrl = serverUrl.replace(/\/$/, '');
+        const body = await request.json();
+        if (!body || !body.serverUrl || !body.username || !body.password) throw new Error("Missing Xtream credentials.");
+        
+        const sourceId = `src_${crypto.randomUUID()}`;
+        const cleanUrl = validateUrl(body.serverUrl.replace(/\/$/, ''));
         const headers = { "User-Agent": "IPTVSmarters/1.0" };
         
-        // 1. Fetch Categories Dictionary first
-        const catRes = await fetch(`${cleanUrl}/player_api.php?username=${username}&password=${password}&action=get_live_categories`, { headers });
-        if (!catRes.ok) throw new Error(`Xtream server rejected categories connection. HTTP Status: ${catRes.status}`);
         let catMap = {};
         try {
+          const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_categories`, { headers });
           const catData = await catRes.json();
           if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
-        } catch (e) {
-          console.warn("Failed to parse Xtream categories, proceeding with fallback.");
-        }
+        } catch (e) { console.warn("Failed to parse Xtream categories."); }
 
-        // 2. Fetch Streams and Map to Category Dictionary
-        const targetApi = `${cleanUrl}/player_api.php?username=${username}&password=${password}&action=get_live_streams`;
-        const response = await fetch(targetApi, { headers });
-        if (!response.ok) throw new Error(`Xtream server rejected streams connection. HTTP Status: ${response.status}`);
+        const response = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_streams`, { headers });
         const data = await response.json();
-        if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API. Expected an array of streams.");
+        if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
         
         const channels = data.map((ch, idx) => ({ 
-          id: `${sourceId}_xtream_${ch.stream_id || idx}`, 
+          id: generateStableId(sourceId, ch.stream_id, ch.name), 
           source_id: sourceId, 
           name: ch.name || `Channel ${idx}`, 
           channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', 
           logo_url: ch.stream_icon || null, 
-          stream_url: `${cleanUrl}/${username}/${password}/${ch.stream_id}` 
+          stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}` 
         }));
         
-        const count = await insertDatabaseBatch(env, channels, sourceId, name, "Xtream API", cleanUrl);
+        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Xtream API", cleanUrl);
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
       if (url.pathname === "/api/sources/import-stalker" && request.method === "POST") {
-        const { serverUrl, macAddress, name } = await request.json();
-        const sourceId = `src_${Date.now()}`;
-        const cleanUrl = serverUrl.replace(/\/$/, '');
-        const headers = { "Cookie": `mac=${macAddress}`, "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200" };
-        const handshakeRes = await fetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
-        if (!handshakeRes.ok) throw new Error(`Stalker Handshake Failed.`);
+        const body = await request.json();
+        if (!body || !body.serverUrl || !body.macAddress) throw new Error("Missing Stalker credentials.");
+
+        const sourceId = `src_${crypto.randomUUID()}`;
+        const cleanUrl = validateUrl(body.serverUrl.replace(/\/$/, ''));
+        const headers = { "Cookie": `mac=${body.macAddress}`, "User-Agent": "Mozilla/5.0" };
+        
+        const handshakeRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
         const handshake = await handshakeRes.json();
-        if (handshake.js && handshake.js.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
-        const chRes = await fetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
+        if (handshake?.js?.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
+        
+        const chRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
         const chData = await chRes.json();
-        const channels = chData.js.data.map((ch, idx) => ({ id: `${sourceId}_stalker_${ch.id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}` }));
-        const count = await insertDatabaseBatch(env, channels, sourceId, name, "Stalker API", cleanUrl);
+        
+        // Protection: Array safety checks
+        if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker API response format.");
+
+        const channels = chData.js.data.map((ch, idx) => ({ 
+          id: generateStableId(sourceId, ch.cmd, ch.name), 
+          source_id: sourceId, 
+          name: ch.name || `Channel ${idx}`, 
+          channel_group: ch.tv_genre?.title || 'Live TV', 
+          logo_url: ch.logo || null, 
+          stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}` 
+        }));
+        
+        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Stalker API", cleanUrl);
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
@@ -291,9 +290,8 @@ export default {
       const sourceMatch = url.pathname.match(/^\/api\/sources\/(src_[^\/]+)(?:\/(.*))?$/);
       if (sourceMatch) {
         const sourceId = sourceMatch[1];
-        const action = sourceMatch[2]; // e.g., 'refresh' or undefined
+        const action = sourceMatch[2]; 
 
-        // DELETE
         if (request.method === "DELETE" && !action) {
           await env.DB.prepare(`DELETE FROM favorites WHERE channel_id IN (SELECT id FROM channels WHERE source_id = ?)`).bind(sourceId).run();
           await env.DB.prepare(`DELETE FROM channels WHERE source_id = ?`).bind(sourceId).run();
@@ -301,79 +299,77 @@ export default {
           return Response.json({ success: true }, { headers: corsHeaders });
         }
 
-        // RENAME
         if (request.method === "PUT" && !action) {
           const body = await request.json();
-          if (body.name) {
+          if (body && body.name) {
              await env.DB.prepare("UPDATE sources SET name = ? WHERE id = ?").bind(body.name, sourceId).run();
              return Response.json({ success: true }, { headers: corsHeaders });
           }
           throw new Error("Name is required");
         }
 
-        // REFRESH
         if (request.method === "POST" && action === "refresh") {
           const source = await env.DB.prepare("SELECT * FROM sources WHERE id = ?").bind(sourceId).first();
           if (!source) throw new Error("Source not found");
           
           let body = {};
-          try { body = await request.json(); } catch(e) {}
+          try { body = await request.json(); } catch(e) { console.warn(e); }
 
           if (source.type === 'M3U URL') {
-            // FIX: Removed the redundant fetch(). The processImportUrl engine does this safely now!
             const channels = await processImportUrl(source.url, source.id, source.name);
             const count = await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url);
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else if (source.type === 'Xtream API') {
-            const { username, password } = body;
-            if (!username || !password) throw new Error("Xtream credentials required for refresh.");
+            if (!body.username || !body.password) throw new Error("Xtream credentials required for refresh.");
             
             const cleanUrl = source.url.replace(/\/$/, '');
             const headers = { "User-Agent": "IPTVSmarters/1.0" };
             
-            // Re-fetch Category Map
-            const catRes = await fetch(`${cleanUrl}/player_api.php?username=${username}&password=${password}&action=get_live_categories`, { headers });
-            if (!catRes.ok) throw new Error(`Xtream server rejected categories connection.`);
             let catMap = {};
             try {
+              const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_categories`, { headers });
               const catData = await catRes.json();
               if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
-            } catch (e) {}
+            } catch (e) { console.warn(e); }
 
-            // Re-fetch Streams
-            const targetApi = `${cleanUrl}/player_api.php?username=${username}&password=${password}&action=get_live_streams`;
-            const response = await fetch(targetApi, { headers });
-            if (!response.ok) throw new Error(`Xtream server rejected streams connection.`);
+            const response = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_streams`, { headers });
             const data = await response.json();
             if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
             
             const channels = data.map((ch, idx) => ({ 
-              id: `${source.id}_xtream_${ch.stream_id || idx}`, 
+              id: generateStableId(source.id, ch.stream_id, ch.name), 
               source_id: source.id, 
               name: ch.name || `Channel ${idx}`, 
               channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', 
               logo_url: ch.stream_icon || null, 
-              stream_url: `${cleanUrl}/${username}/${password}/${ch.stream_id}` 
+              stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}` 
             }));
             
             const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl);
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else if (source.type === 'Stalker API') {
-            const { macAddress } = body;
-            if (!macAddress) throw new Error("MAC Address required for refresh.");
+            if (!body.macAddress) throw new Error("MAC Address required for refresh.");
             
             const cleanUrl = source.url.replace(/\/$/, '');
-            const headers = { "Cookie": `mac=${macAddress}`, "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200" };
-            const handshakeRes = await fetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
-            if (!handshakeRes.ok) throw new Error(`Stalker Handshake Failed.`);
+            const headers = { "Cookie": `mac=${body.macAddress}`, "User-Agent": "Mozilla/5.0" };
+            const handshakeRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
             const handshake = await handshakeRes.json();
-            if (handshake.js && handshake.js.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
+            if (handshake?.js?.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
             
-            const chRes = await fetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
+            const chRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
             const chData = await chRes.json();
-            const channels = chData.js.data.map((ch, idx) => ({ id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}` }));
+            if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker response.");
+
+            const channels = chData.js.data.map((ch, idx) => ({ 
+              id: generateStableId(source.id, ch.cmd, ch.name), 
+              source_id: source.id, 
+              name: ch.name || `Channel ${idx}`, 
+              channel_group: ch.tv_genre?.title || 'Live TV', 
+              logo_url: ch.logo || null, 
+              stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}` 
+            }));
             
             const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl);
             return Response.json({ success: true, count }, { headers: corsHeaders });
@@ -385,7 +381,7 @@ export default {
       }
 
       // ==========================================
-      // PLAYLIST (SOURCE) AWARE SEARCH & PAGINATION
+      // SEARCH & PAGINATION
       // ==========================================
       if (url.pathname === "/api/categories" && request.method === "GET") {
         const sourceId = url.searchParams.get("sourceId");
@@ -435,15 +431,16 @@ export default {
         }, { headers: corsHeaders });
       }
 
-      // Favorites and Settings
       if (url.pathname === "/api/favorites" && request.method === "GET") {
         const { results } = await env.DB.prepare(`SELECT c.*, s.name as source_name FROM favorites f JOIN channels c ON f.channel_id = c.id JOIN sources s ON c.source_id = s.id ORDER BY c.name ASC`).all();
         return Response.json(results, { headers: corsHeaders });
       }
       if (url.pathname === "/api/favorites" && request.method === "POST") {
-        const { channel_id } = await request.json();
-        await env.DB.prepare("INSERT OR IGNORE INTO favorites (channel_id) VALUES (?)").bind(channel_id).run();
-        return Response.json({ success: true }, { headers: corsHeaders });
+        const body = await request.json();
+        if(body && body.channel_id) {
+          await env.DB.prepare("INSERT OR IGNORE INTO favorites (channel_id) VALUES (?)").bind(body.channel_id).run();
+          return Response.json({ success: true }, { headers: corsHeaders });
+        }
       }
       if (url.pathname.startsWith("/api/favorites/") && request.method === "DELETE") {
         const channelId = url.pathname.split("/").pop();
@@ -458,15 +455,11 @@ export default {
 
       if (url.pathname === "/api/settings" && request.method === "PUT") {
         const body = await request.json();
-        await env.DB.prepare(
-          "UPDATE settings SET default_quality = ?, auto_refresh_interval = ?, default_audio = ?, default_subtitle = ? WHERE id = 'global'"
-        ).bind(
-          body.default_quality, 
-          body.auto_refresh_interval, 
-          body.default_audio || '', 
-          body.default_subtitle || ''
-        ).run();
-        return Response.json({ success: true }, { headers: corsHeaders });
+        if(body) {
+          await env.DB.prepare("UPDATE settings SET default_quality = ?, auto_refresh_interval = ?, default_audio = ?, default_subtitle = ? WHERE id = 'global'")
+            .bind(body.default_quality, body.auto_refresh_interval, body.default_audio || '', body.default_subtitle || '').run();
+          return Response.json({ success: true }, { headers: corsHeaders });
+        }
       }
 
       // FRONTEND ROUTING
@@ -482,11 +475,12 @@ export default {
 
       return Response.json({ status: "API Live" }, { headers: corsHeaders });
     } catch (error) {
-      return Response.json({ error: error.message, stack: error.stack }, { status: 500, headers: corsHeaders });
+      console.error("Backend Error:", error);
+      // Protection: Hide stack traces from frontend
+      return Response.json({ error: error.message || "Internal Server Error" }, { status: 500, headers: corsHeaders });
     }
   },
   
-  // NATIVE CLOUDFLARE CRON TRIGGER EXPORT (if configured in dashboard)
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runAutoRefresh(env));
   }
