@@ -285,12 +285,104 @@ export default {
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
-      if (url.pathname.startsWith("/api/sources/") && request.method === "DELETE") {
-        const sourceId = url.pathname.split("/").pop();
-        await env.DB.prepare(`DELETE FROM favorites WHERE channel_id IN (SELECT id FROM channels WHERE source_id = ?)`).bind(sourceId).run();
-        await env.DB.prepare(`DELETE FROM channels WHERE source_id = ?`).bind(sourceId).run();
-        await env.DB.prepare(`DELETE FROM sources WHERE id = ?`).bind(sourceId).run();
-        return Response.json({ success: true }, { headers: corsHeaders });
+      // ==========================================
+      // SOURCE MANAGEMENT (Delete, Rename, Refresh)
+      // ==========================================
+      const sourceMatch = url.pathname.match(/^\/api\/sources\/(src_[^\/]+)(?:\/(.*))?$/);
+      if (sourceMatch) {
+        const sourceId = sourceMatch[1];
+        const action = sourceMatch[2]; // e.g., 'refresh' or undefined
+
+        // DELETE
+        if (request.method === "DELETE" && !action) {
+          await env.DB.prepare(`DELETE FROM favorites WHERE channel_id IN (SELECT id FROM channels WHERE source_id = ?)`).bind(sourceId).run();
+          await env.DB.prepare(`DELETE FROM channels WHERE source_id = ?`).bind(sourceId).run();
+          await env.DB.prepare(`DELETE FROM sources WHERE id = ?`).bind(sourceId).run();
+          return Response.json({ success: true }, { headers: corsHeaders });
+        }
+
+        // RENAME
+        if (request.method === "PUT" && !action) {
+          const body = await request.json();
+          if (body.name) {
+             await env.DB.prepare("UPDATE sources SET name = ? WHERE id = ?").bind(body.name, sourceId).run();
+             return Response.json({ success: true }, { headers: corsHeaders });
+          }
+          throw new Error("Name is required");
+        }
+
+        // REFRESH
+        if (request.method === "POST" && action === "refresh") {
+          const source = await env.DB.prepare("SELECT * FROM sources WHERE id = ?").bind(sourceId).first();
+          if (!source) throw new Error("Source not found");
+          
+          let body = {};
+          try { body = await request.json(); } catch(e) {}
+
+          if (source.type === 'M3U URL') {
+            const response = await fetch(source.url, { headers: { "User-Agent": "Mozilla/5.0" } });
+            if (!response.ok) throw new Error(`Target server rejected connection. HTTP Status: ${response.status}`);
+            const channels = await processImportUrl(source.url, source.id, source.name);
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url);
+            return Response.json({ success: true, count }, { headers: corsHeaders });
+          } 
+          else if (source.type === 'Xtream API') {
+            const { username, password } = body;
+            if (!username || !password) throw new Error("Xtream credentials required for refresh.");
+            
+            const cleanUrl = source.url.replace(/\/$/, '');
+            const headers = { "User-Agent": "IPTVSmarters/1.0" };
+            
+            // Re-fetch Category Map
+            const catRes = await fetch(`${cleanUrl}/player_api.php?username=${username}&password=${password}&action=get_live_categories`, { headers });
+            if (!catRes.ok) throw new Error(`Xtream server rejected categories connection.`);
+            let catMap = {};
+            try {
+              const catData = await catRes.json();
+              if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
+            } catch (e) {}
+
+            // Re-fetch Streams
+            const targetApi = `${cleanUrl}/player_api.php?username=${username}&password=${password}&action=get_live_streams`;
+            const response = await fetch(targetApi, { headers });
+            if (!response.ok) throw new Error(`Xtream server rejected streams connection.`);
+            const data = await response.json();
+            if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
+            
+            const channels = data.map((ch, idx) => ({ 
+              id: `${source.id}_xtream_${ch.stream_id || idx}`, 
+              source_id: source.id, 
+              name: ch.name || `Channel ${idx}`, 
+              channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', 
+              logo_url: ch.stream_icon || null, 
+              stream_url: `${cleanUrl}/${username}/${password}/${ch.stream_id}` 
+            }));
+            
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl);
+            return Response.json({ success: true, count }, { headers: corsHeaders });
+          }
+          else if (source.type === 'Stalker API') {
+            const { macAddress } = body;
+            if (!macAddress) throw new Error("MAC Address required for refresh.");
+            
+            const cleanUrl = source.url.replace(/\/$/, '');
+            const headers = { "Cookie": `mac=${macAddress}`, "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200" };
+            const handshakeRes = await fetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
+            if (!handshakeRes.ok) throw new Error(`Stalker Handshake Failed.`);
+            const handshake = await handshakeRes.json();
+            if (handshake.js && handshake.js.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
+            
+            const chRes = await fetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
+            const chData = await chRes.json();
+            const channels = chData.js.data.map((ch, idx) => ({ id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}` }));
+            
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl);
+            return Response.json({ success: true, count }, { headers: corsHeaders });
+          }
+          else {
+            throw new Error("Local Uploads cannot be refreshed.");
+          }
+        }
       }
 
       // ==========================================
