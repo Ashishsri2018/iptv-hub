@@ -17,7 +17,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
   
-  // 4. LocalStorage NaN Corruption Fix
   const [volume, setVolume] = useState(() => {
     const saved = localStorage.getItem('iptv_volume');
     if (saved === null) return 1;
@@ -62,7 +61,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  // 6. Retry Counter Reset on Channel Change
   useEffect(() => {
     setRetryCount(0);
   }, [streamUrl]);
@@ -93,10 +91,9 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   // MAIN PLAYER ENGINE
   useEffect(() => {
-    // 3. Race Condition Fix: AbortController
     const abortController = new AbortController();
+    let isMounted = true;
     
-    // 5. Purge Old Tracks on Initialization
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
     setActiveMenu(null);
@@ -107,13 +104,17 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     activeMenuRef.current = null;
     userTouchedSubtitles.current = false; 
     
+    if (containerRef.current) {
+      containerRef.current.style.opacity = '1';
+      containerRef.current.style.display = '';
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
     video.volume = volume;
     video.muted = isMuted;
 
-    // 1 & 3. Native Event Syncing
     const handleNativePlay = () => setIsPlaying(true);
     const handleNativePause = () => setIsPlaying(false);
     const handleNativeWaiting = () => setIsBuffering(true);
@@ -154,7 +155,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     video.addEventListener('leavepictureinpicture', handleLeavePip);
 
     const initializePlayer = async () => {
-      // Immediate protocol rejection (Fixes Blank Screen on acestream://)
       if (!streamUrl.startsWith('http')) {
         setErrorUI({
           title: "External Protocol",
@@ -181,6 +181,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       } catch (e: any) { 
         if (e.name !== 'AbortError') console.error("Settings Fetch Error:", e); 
       }
+
+      if (!isMounted) return;
 
       if (Hls.isSupported()) {
         const hls = new Hls({ maxMaxBufferLength: 30 });
@@ -286,7 +288,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             }
 
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              // Catch MP4s hiding as M3U8s
               if (data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR) {
                 setErrorUI({ title: "Incompatible Stream", desc: "This stream is a direct media file or unsupported format. Try opening it in an external player.", raw: data.details });
                 setHasFatalError(true);
@@ -294,7 +295,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                 return;
               }
 
-              // 8. HLS Micro-Recoveries
               if (internalNetworkRetries < 3) {
                 internalNetworkRetries++;
                 hls.startLoad();
@@ -325,7 +325,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         video.addEventListener('loadedmetadata', handleNativeMeta);
         video.addEventListener('error', handleNativeError);
       } else {
-        // Ultimate Fallback: Browser admits it can't play it
         setErrorUI({ title: "Unsupported Format", desc: "Your browser does not support this video format natively.", raw: "ERR_FORMAT_NOT_SUPPORTED" });
         setHasFatalError(true);
         setIsBuffering(false);
@@ -336,7 +335,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     startControlHideTimer();
 
     return () => {
-      // 1. Cleanup Event Listeners and Abort Fetch
+      isMounted = false;
       abortController.abort();
       
       if (hlsRef.current) {
@@ -357,8 +356,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       
       if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
       
-      // 12. Graceful Teardown
       video.removeAttribute('src'); 
+      video.load();
     };
   }, [streamUrl, retryCount]);
 
@@ -380,7 +379,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
-      // 2. Proper ABR Reactivation
       hlsRef.current.currentLevel = levelIndex;
       if (levelIndex === -1) {
         hlsRef.current.nextLoadLevel = -1;
@@ -442,7 +440,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     }
   };
 
-  // 11. Mute Slider UX Inconsistency Fix
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setVolume(val);
@@ -579,10 +576,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         </div>
       )}
 
-      {/* 10. Menu Outside Click Overlay */}
+      {/* FIXED: Z-INDEX 30 (Sits exactly behind the Z-40 controls) */}
       {activeMenu && (
         <div 
-          className="absolute inset-0 z-40" 
+          className="absolute inset-0 z-30" 
           onClick={(e) => {
             e.stopPropagation();
             setActiveMenu(null);
@@ -636,14 +633,14 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         </div>
       )}
 
-      {/* Control Bar */}
+      {/* Control Bar FIXED: Elevated to Z-40 */}
       {!hasFatalError && (
-        <div className={`absolute bottom-0 left-0 w-full bg-gradient-to-t from-black via-black/80 to-transparent transition-opacity duration-300 px-4 pb-4 pt-16 z-20 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-          <div className="w-full h-2 bg-slate-700/50 rounded-full mb-4 cursor-pointer relative group/seek z-50 pointer-events-auto" onClick={handleSeek}>
+        <div className={`absolute bottom-0 left-0 w-full bg-gradient-to-t from-black via-black/80 to-transparent transition-opacity duration-300 px-4 pb-4 pt-16 z-40 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+          <div className="w-full h-2 bg-slate-700/50 rounded-full mb-4 cursor-pointer relative group/seek" onClick={handleSeek}>
             <div className="h-full rounded-full transition-all bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" style={{ width: `${progress}%` }} />
           </div>
 
-          <div className="flex items-center justify-between z-50 pointer-events-auto">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-4 sm:gap-6">
               <button onClick={togglePlay} className="text-white hover:text-blue-400 transition-colors">
                 {isPlaying ? <Pause size={24} className="fill-current" /> : <Play size={24} className="fill-current" />}
