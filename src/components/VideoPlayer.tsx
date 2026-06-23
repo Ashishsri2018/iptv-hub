@@ -84,9 +84,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   // MAIN PLAYER ENGINE
   useEffect(() => {
-    let isMounted = true; // Prevents race conditions during rapid channel switching
+    let isMounted = true; 
 
-    // Purge old states on load
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
     setActiveMenu(null);
@@ -107,7 +106,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     video.volume = volume;
     video.muted = isMuted;
 
-    // EVENT SYNC: Ties React State directly to Native Video DOM State
     const handleNativePlay = () => setIsPlaying(true);
     const handleNativePause = () => setIsPlaying(false);
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
@@ -130,11 +128,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     video.addEventListener('enterpictureinpicture', handleEnterPip);
     video.addEventListener('leavepictureinpicture', handleLeavePip);
 
-    // Safari Native Handlers
     const handleNativeMeta = () => {
       setIsBuffering(false);
       video.play().catch(() => setIsPlaying(false));
     };
+    
     const handleNativeError = () => {
       setIsBuffering(false);
       if (!navigator.onLine) {
@@ -274,7 +272,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             }
 
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              // INVISIBLE RECOVERY ENGINE
               if (internalNetworkRetries < 3) {
                 internalNetworkRetries++;
                 hls.startLoad();
@@ -288,7 +285,15 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               hls.recoverMediaError();
             }
             else {
-              setErrorUI({ title: "Playback Error", desc: "The video format is not supported or the stream data is corrupted.", raw: `Media Error: ${data.details}` });
+              // GRACEFUL RECOVERY: If the level switch fails, catch it and force Auto ABR
+              if (data.details === 'levelSwitchError' || data.details === 'levelLoadError') {
+                console.warn(`HLS intercepted ${data.details}. Forcing fallback to Auto mode.`);
+                hls.currentLevel = -1;
+                setCurrentLevel(-1);
+                return;
+              }
+              
+              setErrorUI({ title: "Playback Error", desc: "The video format is not supported or the stream data is corrupted.", raw: `System Error: ${data.details}` });
               setHasFatalError(true);
               hls.destroy();
             }
@@ -306,7 +311,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     startControlHideTimer();
 
     return () => {
-      isMounted = false; // Kill fetching race condition
+      isMounted = false; 
       if (hlsRef.current) {
         hlsRef.current.stopLoad(); 
         hlsRef.current.detachMedia();
@@ -314,7 +319,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hlsRef.current = null;
       }
       
-      // Remove all event listeners cleanly
       video.removeEventListener('play', handleNativePlay);
       video.removeEventListener('pause', handleNativePause);
       video.removeEventListener('enterpictureinpicture', handleEnterPip);
@@ -324,7 +328,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       
       if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
       
-      // Graceful Teardown
       video.removeAttribute('src'); 
     };
   }, [streamUrl, retryCount]);
@@ -347,12 +350,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
+      // PROPER FIX: Just set currentLevel. HLS.js internal engine handles everything else.
       hlsRef.current.currentLevel = levelIndex;
-      // Force ABR reactivation when Auto (-1) is selected
-      if (levelIndex === -1) {
-        hlsRef.current.nextLoadLevel = -1;
-        hlsRef.current.loadLevel = -1;
-      }
       setCurrentLevel(levelIndex);
       setActiveMenu(null);
       activeMenuRef.current = null;
