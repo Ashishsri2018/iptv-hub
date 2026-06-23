@@ -17,9 +17,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
   
+  // 4. LocalStorage NaN Corruption Fix
   const [volume, setVolume] = useState(() => {
     const saved = localStorage.getItem('iptv_volume');
-    return saved !== null ? parseFloat(saved) : 1;
+    if (saved === null) return 1;
+    const parsed = parseFloat(saved);
+    return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 1;
   });
   const [isMuted, setIsMuted] = useState(() => localStorage.getItem('iptv_muted') === 'true');
   
@@ -59,6 +62,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  // 6. Retry Counter Reset on Channel Change
+  useEffect(() => {
+    setRetryCount(0);
+  }, [streamUrl]);
+
   useEffect(() => {
     const handleFullscreenChange = () => {
       if (!document.fullscreenElement) {
@@ -73,21 +81,22 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     const handleOffline = () => {
       setErrorUI({
         title: "Connection Lost",
-        desc: "Your internet connection dropped while playing the stream. Please check your Wi-Fi or cellular data.",
+        desc: "Your internet connection dropped. Please check your Wi-Fi or cellular data.",
         raw: "ERR_INTERNET_DISCONNECTED"
       });
       setHasFatalError(true);
       setIsBuffering(false);
     };
-
     window.addEventListener('offline', handleOffline);
     return () => window.removeEventListener('offline', handleOffline);
   }, []);
 
   // MAIN PLAYER ENGINE
   useEffect(() => {
-    let isMounted = true; 
-
+    // 3. Race Condition Fix: AbortController
+    const abortController = new AbortController();
+    
+    // 5. Purge Old Tracks on Initialization
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
     setActiveMenu(null);
@@ -98,38 +107,28 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     activeMenuRef.current = null;
     userTouchedSubtitles.current = false; 
     
-    if (containerRef.current) {
-      containerRef.current.style.opacity = '1';
-      containerRef.current.style.display = '';
-    }
-
     const video = videoRef.current;
     if (!video) return;
 
     video.volume = volume;
     video.muted = isMuted;
 
+    // 1 & 3. Native Event Syncing
     const handleNativePlay = () => setIsPlaying(true);
     const handleNativePause = () => setIsPlaying(false);
+    const handleNativeWaiting = () => setIsBuffering(true);
+    const handleNativePlaying = () => setIsBuffering(false);
+    
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     const handleLeavePip = () => {
       setTimeout(() => {
         if (videoRef.current && videoRef.current.paused) {
-          if (containerRef.current) {
-            containerRef.current.style.opacity = '0';
-            containerRef.current.style.display = 'none';
-          }
           window.dispatchEvent(new CustomEvent('force-close-player'));
         } else {
           window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
         }
       }, 100);
     };
-
-    video.addEventListener('play', handleNativePlay);
-    video.addEventListener('pause', handleNativePause);
-    video.addEventListener('enterpictureinpicture', handleEnterPip);
-    video.addEventListener('leavepictureinpicture', handleLeavePip);
 
     const handleNativeMeta = () => {
       setIsBuffering(false);
@@ -138,30 +137,49 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     
     const handleNativeError = () => {
       setIsBuffering(false);
+      const errCode = video.error?.code || 'Unknown';
       if (!navigator.onLine) {
         setErrorUI({ title: "No Internet Connection", desc: "You are offline.", raw: "ERR_INTERNET_DISCONNECTED" });
       } else {
-        setErrorUI({ title: "Playback Error", desc: "The media format is unsupported by your browser or the connection failed.", raw: "Native Browser Error (MEDIA_ERR)" });
+        setErrorUI({ title: "Playback Error", desc: "The media format is unsupported by your browser or the connection failed.", raw: `Native Browser Error (Code: ${errCode})` });
       }
       setHasFatalError(true);
     };
 
+    video.addEventListener('play', handleNativePlay);
+    video.addEventListener('pause', handleNativePause);
+    video.addEventListener('waiting', handleNativeWaiting);
+    video.addEventListener('playing', handleNativePlaying);
+    video.addEventListener('enterpictureinpicture', handleEnterPip);
+    video.addEventListener('leavepictureinpicture', handleLeavePip);
+
     const initializePlayer = async () => {
+      // Immediate protocol rejection (Fixes Blank Screen on acestream://)
+      if (!streamUrl.startsWith('http')) {
+        setErrorUI({
+          title: "External Protocol",
+          desc: "This stream uses a special protocol and must be opened in an external player.",
+          raw: `Unsupported protocol: ${streamUrl.split(':')[0]}`
+        });
+        setHasFatalError(true);
+        setIsBuffering(false);
+        return;
+      }
+
       let defaultQuality = 'auto';
       let defaultAudio = '';
       let defaultSubtitle = '';
 
       try {
-        const res = await fetch(`${API_URL}/api/settings`);
-        if (!isMounted) return; 
+        const res = await fetch(`${API_URL}/api/settings`, { signal: abortController.signal });
         if (res.ok) {
           const data = await res.json();
           defaultQuality = data.default_quality || 'auto';
           defaultAudio = data.default_audio || '';
           defaultSubtitle = data.default_subtitle || '';
         }
-      } catch (e) { 
-        console.error("Settings Fetch Error:", e); 
+      } catch (e: any) { 
+        if (e.name !== 'AbortError') console.error("Settings Fetch Error:", e); 
       }
 
       if (Hls.isSupported()) {
@@ -173,32 +191,25 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
         let initialAudioSet = false;
 
-        // BULLETPROOF SUBTITLE PROCESSOR
         const processSubtitles = (tracks: any[]) => {
           setSubtitleTracks(tracks);
-          
           if (userTouchedSubtitles.current) return; 
           
           if (tracks.length > 0) {
             let targetIdx = -1;
-            
             if (defaultSubtitle) {
               targetIdx = tracks.findIndex(t => 
                 t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
                 t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
               );
             }
-            
-            // Explicitly force HLS rendering ON if target is valid, OFF if target is -1
             hls.subtitleTrack = targetIdx;
-            if (hls.subtitleDisplay !== undefined) {
-              hls.subtitleDisplay = targetIdx !== -1;
-            }
+            if (hls.subtitleDisplay !== undefined) hls.subtitleDisplay = targetIdx !== -1;
             setCurrentSubtitleTrack(targetIdx);
           }
         };
 
-        hls.on(Hls.Events.MANIFEST_PARSED, (_event: string, data: Record<string, any>) => {
+        hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
           setLevels(data.levels || []);
           
           let targetLevel = -1; 
@@ -238,11 +249,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           video.play().catch(() => setIsPlaying(false));
         });
 
-        hls.on(Hls.Events.LEVEL_SWITCHED, (_event: string, data: Record<string, any>) => {
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
           setAutoLevel(data.level);
         });
 
-        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event: string, data: Record<string, any>) => {
+        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event, data) => {
           const tracks = data.audioTracks || [];
           setAudioTracks(tracks);
           if (defaultAudio && !initialAudioSet && tracks.length > 0) {
@@ -258,12 +269,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           }
         });
 
-        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event: string, data: Record<string, any>) => {
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event, data) => {
           processSubtitles(data.subtitleTracks || []);
         });
 
         let internalNetworkRetries = 0;
-        hls.on(Hls.Events.ERROR, (_event: string, data: Record<string, any>) => {
+        hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) {
             setIsBuffering(false);
             
@@ -275,6 +286,15 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             }
 
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              // Catch MP4s hiding as M3U8s
+              if (data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR) {
+                setErrorUI({ title: "Incompatible Stream", desc: "This stream is a direct media file or unsupported format. Try opening it in an external player.", raw: data.details });
+                setHasFatalError(true);
+                hls.destroy();
+                return;
+              }
+
+              // 8. HLS Micro-Recoveries
               if (internalNetworkRetries < 3) {
                 internalNetworkRetries++;
                 hls.startLoad();
@@ -289,12 +309,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             }
             else {
               if (data.details === 'levelSwitchError' || data.details === 'levelLoadError') {
-                console.warn(`HLS intercepted ${data.details}. Forcing fallback to Auto mode.`);
                 hls.currentLevel = -1;
                 setCurrentLevel(-1);
                 return;
               }
-              
               setErrorUI({ title: "Playback Error", desc: "The video format is not supported or the stream data is corrupted.", raw: `System Error: ${data.details}` });
               setHasFatalError(true);
               hls.destroy();
@@ -302,10 +320,15 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           }
         });
       } 
-      else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      else if (video.canPlayType('application/vnd.apple.mpegurl') || video.canPlayType('video/mp4')) {
         video.src = streamUrl;
         video.addEventListener('loadedmetadata', handleNativeMeta);
         video.addEventListener('error', handleNativeError);
+      } else {
+        // Ultimate Fallback: Browser admits it can't play it
+        setErrorUI({ title: "Unsupported Format", desc: "Your browser does not support this video format natively.", raw: "ERR_FORMAT_NOT_SUPPORTED" });
+        setHasFatalError(true);
+        setIsBuffering(false);
       }
     };
 
@@ -313,7 +336,9 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     startControlHideTimer();
 
     return () => {
-      isMounted = false; 
+      // 1. Cleanup Event Listeners and Abort Fetch
+      abortController.abort();
+      
       if (hlsRef.current) {
         hlsRef.current.stopLoad(); 
         hlsRef.current.detachMedia();
@@ -323,6 +348,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       
       video.removeEventListener('play', handleNativePlay);
       video.removeEventListener('pause', handleNativePause);
+      video.removeEventListener('waiting', handleNativeWaiting);
+      video.removeEventListener('playing', handleNativePlaying);
       video.removeEventListener('enterpictureinpicture', handleEnterPip);
       video.removeEventListener('leavepictureinpicture', handleLeavePip);
       video.removeEventListener('loadedmetadata', handleNativeMeta);
@@ -330,6 +357,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       
       if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
       
+      // 12. Graceful Teardown
       video.removeAttribute('src'); 
     };
   }, [streamUrl, retryCount]);
@@ -352,7 +380,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
+      // 2. Proper ABR Reactivation
       hlsRef.current.currentLevel = levelIndex;
+      if (levelIndex === -1) {
+        hlsRef.current.nextLoadLevel = -1;
+      }
       setCurrentLevel(levelIndex);
       setActiveMenu(null);
       activeMenuRef.current = null;
@@ -370,16 +402,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const changeSubtitleTrack = (trackIndex: number) => {
     if (hlsRef.current) {
-      // PROPER SUBTITLE TOGGLE LOGIC
       hlsRef.current.subtitleTrack = trackIndex;
       if (hlsRef.current.subtitleDisplay !== undefined) {
         hlsRef.current.subtitleDisplay = trackIndex !== -1;
       }
       setCurrentSubtitleTrack(trackIndex);
-      
-      // LOCK BACKGROUND OVERRIDES
       userTouchedSubtitles.current = true;
-      
       setActiveMenu(null);
       activeMenuRef.current = null;
     }
@@ -414,6 +442,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     }
   };
 
+  // 11. Mute Slider UX Inconsistency Fix
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setVolume(val);
@@ -423,8 +452,14 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       videoRef.current.volume = val;
       const willMute = val === 0;
       videoRef.current.muted = willMute;
-      setIsMuted(willMute);
-      localStorage.setItem('iptv_muted', willMute.toString());
+      
+      if (!willMute && isMuted) {
+        setIsMuted(false);
+        localStorage.setItem('iptv_muted', 'false');
+      } else if (willMute && !isMuted) {
+        setIsMuted(true);
+        localStorage.setItem('iptv_muted', 'true');
+      }
     }
   };
 
@@ -536,14 +571,24 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         style={{ backgroundColor: 'black' }}
         className={`w-full h-full object-contain bg-black ${hasFatalError ? 'hidden' : ''}`}
         onTimeUpdate={handleTimeUpdate}
-        onWaiting={() => setIsBuffering(true)}
-        onPlaying={() => setIsBuffering(false)}
       />
 
       {isBuffering && !hasFatalError && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
           <Loader2 size={48} className="animate-spin text-blue-500 drop-shadow-lg" />
         </div>
+      )}
+
+      {/* 10. Menu Outside Click Overlay */}
+      {activeMenu && (
+        <div 
+          className="absolute inset-0 z-40" 
+          onClick={(e) => {
+            e.stopPropagation();
+            setActiveMenu(null);
+            activeMenuRef.current = null;
+          }}
+        />
       )}
 
       {/* INTELLIGENT ERROR UI */}
@@ -594,11 +639,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       {/* Control Bar */}
       {!hasFatalError && (
         <div className={`absolute bottom-0 left-0 w-full bg-gradient-to-t from-black via-black/80 to-transparent transition-opacity duration-300 px-4 pb-4 pt-16 z-20 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-          <div className="w-full h-2 bg-slate-700/50 rounded-full mb-4 cursor-pointer relative group/seek" onClick={handleSeek}>
+          <div className="w-full h-2 bg-slate-700/50 rounded-full mb-4 cursor-pointer relative group/seek z-50 pointer-events-auto" onClick={handleSeek}>
             <div className="h-full rounded-full transition-all bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]" style={{ width: `${progress}%` }} />
           </div>
 
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between z-50 pointer-events-auto">
             <div className="flex items-center gap-4 sm:gap-6">
               <button onClick={togglePlay} className="text-white hover:text-blue-400 transition-colors">
                 {isPlaying ? <Pause size={24} className="fill-current" /> : <Play size={24} className="fill-current" />}
