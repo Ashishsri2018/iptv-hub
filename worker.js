@@ -320,12 +320,11 @@ export default {
           try { body = await request.json(); } catch(e) {}
 
           if (source.type === 'M3U URL') {
-            const response = await fetch(source.url, { headers: { "User-Agent": "Mozilla/5.0" } });
-            if (!response.ok) throw new Error(`Target server rejected connection. HTTP Status: ${response.status}`);
+            // FIX: Removed the redundant fetch(). The processImportUrl engine does this safely now!
             const channels = await processImportUrl(source.url, source.id, source.name);
             const count = await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url);
             return Response.json({ success: true, count }, { headers: corsHeaders });
-          } 
+          }
           else if (source.type === 'Xtream API') {
             const { username, password } = body;
             if (!username || !password) throw new Error("Xtream credentials required for refresh.");
