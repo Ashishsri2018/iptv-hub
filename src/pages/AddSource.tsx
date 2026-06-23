@@ -1,15 +1,22 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Link, Upload, Server, Tv2, Loader2, CheckCircle, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { API_URL } from '../config';
 
 type Tab = 'm3u-url' | 'm3u-file' | 'xtream' | 'stalker';
+type StatusState = 'idle' | 'loading' | 'success' | 'error';
+
+interface Status {
+  state: StatusState;
+  message: string;
+  details: string;
+}
 
 export default function AddSource() {
   const [activeTab, setActiveTab] = useState<Tab>('m3u-url');
   
   // Shared States
   const [nameInput, setNameInput] = useState('');
-  const [status, setStatus] = useState({ state: 'idle', message: '', details: '' });
+  const [status, setStatus] = useState<Status>({ state: 'idle', message: '', details: '' });
   
   // Specific Form States
   const [urlInput, setUrlInput] = useState('');
@@ -25,7 +32,18 @@ export default function AddSource() {
   const [showStalkerMac, setShowStalkerMac] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
+  // Cleanup fetches if component unmounts
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  // Helpers
   const handleError = (error: any, context: string) => {
     console.error(context, error);
     setStatus({ 
@@ -35,39 +53,70 @@ export default function AddSource() {
     });
   };
 
+  const isValidUrl = (str: string) => {
+    try { 
+      const u = new URL(str); 
+      return ['http:', 'https:'].includes(u.protocol); 
+    } catch { 
+      return false; 
+    }
+  };
+
+  const isValidMac = (str: string) => /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(str);
+
+  const safeJson = async (res: Response) => {
+    try { 
+      return await res.json(); 
+    } catch { 
+      throw new Error('Invalid JSON response from server.'); 
+    }
+  };
+
   // 1. M3U URL Processor
   const processM3UUrl = async () => {
     if (!urlInput || !nameInput) return;
+    if (!isValidUrl(urlInput)) return handleError(new Error("Invalid URL format."), "Validation");
+
+    abortControllerRef.current = new AbortController();
     setStatus({ state: 'loading', message: 'Commanding server to download and parse URL...', details: '' });
 
     try {
       const response = await fetch(`${API_URL}/api/sources/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playlistUrl: urlInput, name: nameInput, type: 'M3U URL' })
+        body: JSON.stringify({ playlistUrl: urlInput, name: nameInput, type: 'M3U URL' }),
+        signal: abortControllerRef.current.signal
       });
 
-      const data = await response.json();
+      const data = await safeJson(response);
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
 
       setStatus({ state: 'success', message: `Success! Added ${data.count} channels.`, details: '' });
       setUrlInput(''); setNameInput('');
-    } catch (error: any) { handleError(error, "M3U URL Error"); }
+    } catch (error: any) { 
+      if (error.name !== 'AbortError') handleError(error, "M3U URL Error"); 
+    }
   };
 
-  // 2. M3U File Processor (Local Parsing to bypass Cloudflare 1MB limits)
+  // 2. M3U File Processor (Memory Safe Chunking + Deterministic IDs)
   const processM3UFile = async () => {
     if (!file || !nameInput) return;
+    
+    abortControllerRef.current = new AbortController();
     setStatus({ state: 'loading', message: 'Reading local file...', details: '' });
 
     try {
       const text = await file.text();
-      setStatus({ state: 'loading', message: 'Parsing channels locally...', details: '' });
+      setStatus({ state: 'loading', message: 'Parsing and uploading in chunks...', details: '' });
+
+      // Deterministic ID prevents duplicate playlists if a batch fails and user clicks retry
+      const safeFileName = file.name.replace(/[^a-zA-Z0-9]/g, '');
+      const sourceId = `src_${safeFileName}_${file.size}`.substring(0, 25);
 
       const lines = text.split('\n');
-      const channels = [];
+      let currentBatch: any[] = [];
       let currentChannel: any = {};
-      const sourceId = `src_${Date.now()}`;
+      let totalUploaded = 0;
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
@@ -80,76 +129,105 @@ export default function AddSource() {
           currentChannel.name = commaSplit.length > 1 ? commaSplit[commaSplit.length - 1].trim() : 'Unknown';
         } else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
           currentChannel.stream_url = line;
-          currentChannel.id = `${sourceId}_${i}`; // Temp ID, DB will overwrite based on URL
-          channels.push({ ...currentChannel });
+          currentChannel.id = `${sourceId}_${totalUploaded + currentBatch.length}`; 
+          currentBatch.push({ ...currentChannel });
           currentChannel = {};
+
+          // Flush to DB and clear memory every 500 lines to prevent browser crashes
+          if (currentBatch.length >= 500) {
+            const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sourceId, name: nameInput, type: 'M3U File', channels: currentBatch }),
+              signal: abortControllerRef.current.signal
+            });
+            const errData = await safeJson(res);
+            if (!res.ok) throw new Error(errData.error || `Batch upload failed.`);
+            
+            totalUploaded += currentBatch.length;
+            currentBatch = []; // Free RAM instantly
+            setStatus({ state: 'loading', message: `Uploaded ${totalUploaded} channels...`, details: '' });
+          }
         }
       }
 
-      if (channels.length === 0) throw new Error("No playable streams found in file.");
-
-      setStatus({ state: 'loading', message: `Uploading ${channels.length} channels to database in chunks...`, details: '' });
-
-      // Chunk array into batches of 500 to protect Cloudflare request limits
-      const chunkSize = 500;
-      for (let i = 0; i < channels.length; i += chunkSize) {
-        const chunk = channels.slice(i, i + chunkSize);
+      // Flush remaining channels
+      if (currentBatch.length > 0) {
         const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sourceId, name: nameInput, type: 'M3U File', channels: chunk })
+          body: JSON.stringify({ sourceId, name: nameInput, type: 'M3U File', channels: currentBatch }),
+          signal: abortControllerRef.current.signal
         });
-        if (!res.ok) {
-           const errData = await res.json();
-           throw new Error(errData.error || `Batch ${i} upload failed.`);
-        }
+        const errData = await safeJson(res);
+        if (!res.ok) throw new Error(errData.error || `Final batch upload failed.`);
+        totalUploaded += currentBatch.length;
       }
 
-      setStatus({ state: 'success', message: `Success! Added ${channels.length} channels.`, details: '' });
+      if (totalUploaded === 0) throw new Error("No playable streams found in file.");
+
+      setStatus({ state: 'success', message: `Success! Added ${totalUploaded} channels.`, details: '' });
       setFile(null); setNameInput('');
       if (fileInputRef.current) fileInputRef.current.value = '';
 
-    } catch (error: any) { handleError(error, "M3U File Error"); }
+    } catch (error: any) { 
+      if (error.name !== 'AbortError') handleError(error, "M3U File Error"); 
+    }
   };
 
   // 3. Xtream Codes Processor
   const processXtream = async () => {
     if (!xtreamUrl || !xtreamUser || !xtreamPass || !nameInput) return;
+    if (!isValidUrl(xtreamUrl)) return handleError(new Error("Invalid Server URL format."), "Validation");
+
+    abortControllerRef.current = new AbortController();
     setStatus({ state: 'loading', message: 'Authenticating with Xtream API...', details: '' });
 
     try {
       const response = await fetch(`${API_URL}/api/sources/import-xtream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serverUrl: xtreamUrl, username: xtreamUser, password: xtreamPass, name: nameInput })
+        body: JSON.stringify({ serverUrl: xtreamUrl, username: xtreamUser, password: xtreamPass, name: nameInput }),
+        signal: abortControllerRef.current.signal
       });
 
-      const data = await response.json();
+      const data = await safeJson(response);
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
 
       setStatus({ state: 'success', message: `Success! Synced ${data.count} Xtream channels.`, details: '' });
       setXtreamUrl(''); setXtreamUser(''); setXtreamPass(''); setNameInput('');
-    } catch (error: any) { handleError(error, "Xtream API Error"); }
+      setShowXtreamPass(false); // Reset visibility for security
+    } catch (error: any) { 
+      if (error.name !== 'AbortError') handleError(error, "Xtream API Error"); 
+    }
   };
 
   // 4. Stalker Portal Processor
   const processStalker = async () => {
     if (!stalkerUrl || !stalkerMac || !nameInput) return;
+    if (!isValidUrl(stalkerUrl)) return handleError(new Error("Invalid Portal URL format."), "Validation");
+    if (!isValidMac(stalkerMac)) return handleError(new Error("Invalid MAC Address. Use format: 00:1A:79:XX:YY:ZZ"), "Validation");
+
+    abortControllerRef.current = new AbortController();
     setStatus({ state: 'loading', message: 'Performing Stalker Portal Handshake...', details: '' });
 
     try {
       const response = await fetch(`${API_URL}/api/sources/import-stalker`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serverUrl: stalkerUrl, macAddress: stalkerMac, name: nameInput })
+        body: JSON.stringify({ serverUrl: stalkerUrl, macAddress: stalkerMac, name: nameInput }),
+        signal: abortControllerRef.current.signal
       });
 
-      const data = await response.json();
+      const data = await safeJson(response);
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
 
       setStatus({ state: 'success', message: `Success! Synced ${data.count} Stalker channels.`, details: '' });
       setStalkerUrl(''); setStalkerMac(''); setNameInput('');
-    } catch (error: any) { handleError(error, "Stalker API Error"); }
+      setShowStalkerMac(false); // Reset visibility for security
+    } catch (error: any) { 
+      if (error.name !== 'AbortError') handleError(error, "Stalker API Error"); 
+    }
   };
 
   const renderErrorBlock = () => (
@@ -158,8 +236,8 @@ export default function AddSource() {
         <AlertTriangle size={20} /> System Error Captured
       </div>
       <p className="text-red-300 text-sm">{status.message}</p>
-      <div className="bg-black/50 p-2 rounded border border-red-900 overflow-x-auto">
-        <code className="text-xs text-red-400 font-mono break-all">{status.details}</code>
+      <div className="bg-black/50 p-2 rounded border border-red-900 overflow-x-auto custom-scrollbar">
+        <code className="text-xs text-red-400 font-mono whitespace-pre-wrap break-all">{status.details}</code>
       </div>
     </div>
   );
@@ -222,9 +300,9 @@ export default function AddSource() {
         {activeTab === 'm3u-file' && (
           <div className="flex flex-col gap-5">
             <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Local Playlist File (.m3u)</label>
+              <label className="block text-sm font-medium text-slate-400 mb-1">Local Playlist File</label>
               <input 
-                type="file" accept=".m3u,.m3u8,text/plain" ref={fileInputRef} onChange={(e) => setFile(e.target.files?.[0] || null)}
+                type="file" accept=".m3u,.m3u8,text/plain,.txt" ref={fileInputRef} onChange={(e) => setFile(e.target.files?.[0] || null)}
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-900/30 file:text-blue-400 hover:file:bg-blue-900/50 cursor-pointer" 
                 disabled={status.state === 'loading'}
               />
@@ -240,12 +318,12 @@ export default function AddSource() {
           <div className="flex flex-col gap-5">
             <div>
               <label className="block text-sm font-medium text-slate-400 mb-1">Server URL</label>
-              <input type="url" value={xtreamUrl} onChange={(e) => setXtreamUrl(e.target.value)} placeholder="http://domain.com:port" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100" disabled={status.state === 'loading'} />
+              <input type="url" value={xtreamUrl} onChange={(e) => setXtreamUrl(e.target.value)} placeholder="http://domain.com:port" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" disabled={status.state === 'loading'} />
             </div>
             <div className="flex gap-4">
               <div className="flex-1">
                 <label className="block text-sm font-medium text-slate-400 mb-1">Username</label>
-                <input type="text" value={xtreamUser} onChange={(e) => setXtreamUser(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100" disabled={status.state === 'loading'} />
+                <input type="text" value={xtreamUser} onChange={(e) => setXtreamUser(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" disabled={status.state === 'loading'} />
               </div>
               <div className="flex-1">
                 <label className="block text-sm font-medium text-slate-400 mb-1">Password</label>
@@ -279,7 +357,7 @@ export default function AddSource() {
           <div className="flex flex-col gap-5">
             <div>
               <label className="block text-sm font-medium text-slate-400 mb-1">Portal URL</label>
-              <input type="url" value={stalkerUrl} onChange={(e) => setStalkerUrl(e.target.value)} placeholder="http://domain.com:port/c/" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100" disabled={status.state === 'loading'} />
+              <input type="url" value={stalkerUrl} onChange={(e) => setStalkerUrl(e.target.value)} placeholder="http://domain.com:port/c/" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" disabled={status.state === 'loading'} />
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-400 mb-1">MAC Address</label>

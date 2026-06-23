@@ -12,37 +12,61 @@ interface FavoriteChannel {
   source_name: string; 
 }
 
+type ToastType = 'success' | 'error';
+
 export default function Favorites() {
-  // UPDATED: Destructure setPlayingChannel instead of playChannel
   const { setPlayingChannel } = useAppStore();
   const [favorites, setFavorites] = useState<FavoriteChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
-  const [toast, setToast] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
-  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [toast, setToast] = useState<{msg: string, type: ToastType} | null>(null);
+  
+  // REFS FOR MEMORY SAFETY & LOCKS
+  const pressTimer = useRef<number | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const isLongPressRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
+  // MEMORY LEAK CLEANUP ON UNMOUNT
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) window.clearTimeout(toastTimer.current);
+      if (pressTimer.current) window.clearTimeout(pressTimer.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+    };
+  }, []);
+
+  const showToast = (msg: string, type: ToastType = 'success') => {
     setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 3000);
   };
 
-  useEffect(() => { fetchFavorites(); }, []);
+  useEffect(() => { 
+    fetchFavorites(); 
+  }, []);
 
   const fetchFavorites = async () => {
+    abortControllerRef.current = new AbortController();
     try {
-      const res = await fetch(`${API_URL}/api/favorites`);
+      const res = await fetch(`${API_URL}/api/favorites`, {
+        signal: abortControllerRef.current.signal
+      });
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (Array.isArray(data)) setFavorites(data);
     } catch (error: any) { 
-      console.error("Favorites Fetch Error:", error);
-      showToast(`Failed to load favorites: ${error.message}`, 'error');
-      setFavorites([]); 
-    } 
-    finally { setLoading(false); }
+      if (error.name !== 'AbortError') {
+        console.error("Favorites Fetch Error:", error);
+        showToast(`Failed to load favorites: ${error.message}`, 'error');
+        setFavorites([]); 
+      }
+    } finally { 
+      setLoading(false); 
+    }
   };
 
   const removeFavorite = async (e: React.MouseEvent, channelId: string) => {
@@ -59,15 +83,47 @@ export default function Favorites() {
     }
   };
 
-  const handleTouchStart = (url: string) => {
-    pressTimer.current = setTimeout(() => {
-      navigator.clipboard.writeText(url)
-        .then(() => showToast("Link Copied!", 'success'))
-        .catch(err => showToast(`Copy Failed: ${err.message}`, 'error'));
-    }, 800);
+  // ROBUST CLIPBOARD FALLBACK (HTTP compatible)
+  const copyToClipboard = async (text: string) => {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "absolute";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+      } catch (error) {
+        throw new Error("Clipboard API blocked by browser");
+      } finally {
+        textArea.remove();
+      }
+    }
   };
 
-  const handleTouchEnd = () => { if (pressTimer.current) clearTimeout(pressTimer.current); };
+  // UNIFIED POINTER EVENTS
+  const handlePointerDown = (url: string) => {
+    isLongPressRef.current = false;
+    if (pressTimer.current) window.clearTimeout(pressTimer.current);
+    
+    pressTimer.current = window.setTimeout(async () => {
+      isLongPressRef.current = true;
+      try {
+        await copyToClipboard(url);
+        if (navigator.vibrate) navigator.vibrate(50);
+        showToast("Link Copied!", 'success');
+      } catch (err: any) {
+        showToast(`Copy Failed: ${err.message}`, 'error');
+      }
+    }, 600);
+  };
+
+  const handlePointerUpOrLeave = () => { 
+    if (pressTimer.current) window.clearTimeout(pressTimer.current); 
+  };
 
   const launchExternalPlayer = (e: React.MouseEvent, url: string, name: string) => {
     e.stopPropagation();
@@ -92,7 +148,8 @@ export default function Favorites() {
           throw new Error("Invalid URL formatting for Android OS.");
         }
       } else {
-        targetUrl = `vlc://${url}`;
+        // Desktop VLC handler encode fallback
+        targetUrl = `vlc://${url.includes('?') ? encodeURIComponent(url) : url}`;
       }
 
       window.location.href = targetUrl;
@@ -103,15 +160,19 @@ export default function Favorites() {
     }
   };
 
+  // PERFORMANCE: Memoize Fuse instance separately from search execution
+  const fuseIndex = useMemo(() => {
+    return new Fuse(favorites, { keys: ['name', 'source_name'], threshold: 0.3, useExtendedSearch: true });
+  }, [favorites]);
+
   const searchResults = useMemo(() => {
     const cleanQuery = searchQuery.trim();
     if (!cleanQuery) return favorites;
-    
-    const fuse = new Fuse(favorites, { keys: ['name', 'source_name'], threshold: 0.3, useExtendedSearch: true });
     const formattedQuery = cleanQuery.split(/\s+/).map(word => `'${word}`).join(' ');
-    return fuse.search(formattedQuery).map(res => res.item);
-  }, [favorites, searchQuery]);
+    return fuseIndex.search(formattedQuery).map(res => res.item);
+  }, [fuseIndex, searchQuery, favorites]);
 
+  // CUSTOM SORTING (Letters A-Z -> Numbers 0-9 -> Symbols #)
   const groupedFavorites = useMemo(() => {
     const groups: Record<string, FavoriteChannel[]> = {};
     searchResults.forEach(ch => {
@@ -120,8 +181,17 @@ export default function Favorites() {
       if (!groups[firstChar]) groups[firstChar] = [];
       groups[firstChar].push(ch);
     });
+    
     return Object.keys(groups)
-      .sort((a, b) => a==='#'?1:b==='#'?-1:a.localeCompare(b))
+      .sort((a, b) => {
+        if (a === '#') return 1;
+        if (b === '#') return -1;
+        const isNumA = /^\d$/.test(a);
+        const isNumB = /^\d$/.test(b);
+        if (isNumA && !isNumB) return 1;
+        if (!isNumA && isNumB) return -1;
+        return a.localeCompare(b);
+      })
       .map(letter => ({ letter, channels: groups[letter].sort((a, b) => a.name.localeCompare(b.name)) }));
   }, [searchResults]);
 
@@ -131,6 +201,7 @@ export default function Favorites() {
     <div className="flex flex-col h-full bg-[#0f1115] relative">
       <div className="p-4 sm:p-6 border-b border-slate-800/50 bg-[#12141a] shrink-0 z-10 shadow-sm">
         
+        {/* HEADER & VIEW TOGGLE */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
           <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
             <Star className="text-yellow-400 fill-yellow-400" /> Favorites
@@ -154,6 +225,7 @@ export default function Favorites() {
           </div>
         </div>
         
+        {/* SEARCH BAR */}
         <div className="relative w-full flex items-center">
           <Search className="absolute left-3 text-slate-400" size={18} />
           <input 
@@ -177,7 +249,11 @@ export default function Favorites() {
             </div>
           ) : (
             groupedFavorites.map(group => (
-              <div key={group.letter} className="mb-8">
+              <div 
+                key={group.letter} 
+                className="mb-8"
+                style={{ contentVisibility: 'auto', containIntrinsicSize: '500px' }} // SCROLL PERFORMANCE FIX
+              >
                 <h3 className="text-2xl font-bold text-slate-100 mb-4 border-b border-slate-800/50 pb-2 inline-block min-w-[3rem]">{group.letter}</h3>
                 
                 <div className={viewMode === 'grid' 
@@ -185,35 +261,29 @@ export default function Favorites() {
                   : "space-y-2 sm:space-y-3"
                 }>
                   {group.channels.map(channel => {
-                    const isExternalOnly = !channel.stream_url.startsWith('http');
+                    const isExternalOnly = !channel.stream_url.toLowerCase().startsWith('http');
                     
+                    // COMPACT GRID VIEW
                     if (viewMode === 'grid') {
                       return (
                         <div 
                           key={channel.id}
-                          onMouseDown={() => handleTouchStart(channel.stream_url)}
-                          onMouseUp={handleTouchEnd}
-                          onMouseLeave={handleTouchEnd}
-                          onTouchStart={() => handleTouchStart(channel.stream_url)}
-                          onTouchEnd={handleTouchEnd}
+                          onPointerDown={() => handlePointerDown(channel.stream_url)}
+                          onPointerUp={handlePointerUpOrLeave}
+                          onPointerLeave={handlePointerUpOrLeave}
+                          onPointerCancel={handlePointerUpOrLeave}
                           onClick={(e) => { 
-                            // UPDATED: Now passing the logo_url to the global store
+                            if (isLongPressRef.current) { e.preventDefault(); e.stopPropagation(); return; }
                             if(!isExternalOnly) setPlayingChannel(channel.stream_url, channel.name, channel.logo_url); 
                             else launchExternalPlayer(e, channel.stream_url, channel.name); 
                           }}
                           className="bg-[#12141a] border border-slate-800/60 rounded-xl overflow-hidden hover:border-blue-500/50 hover:shadow-[0_0_15px_rgba(59,130,246,0.15)] transition-all cursor-pointer group flex flex-col relative"
                         >
                           <div className="absolute top-1 right-1 z-10 flex gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                            <button
-                              onClick={(e) => launchExternalPlayer(e, channel.stream_url, channel.name)}
-                              className="p-1 bg-black/70 hover:bg-black rounded-md text-slate-200 hover:text-white backdrop-blur-md transition-colors"
-                            >
+                            <button onClick={(e) => launchExternalPlayer(e, channel.stream_url, channel.name)} className="p-1 bg-black/70 hover:bg-black rounded-md text-slate-200 hover:text-white backdrop-blur-md transition-colors">
                               <ExternalLink size={14} />
                             </button>
-                            <button
-                              onClick={(e) => removeFavorite(e, channel.id)}
-                              className="p-1 bg-black/70 hover:bg-red-500/90 rounded-md text-slate-200 hover:text-white backdrop-blur-md transition-colors"
-                            >
+                            <button onClick={(e) => removeFavorite(e, channel.id)} className="p-1 bg-black/70 hover:bg-red-500/90 rounded-md text-slate-200 hover:text-white backdrop-blur-md transition-colors">
                               <Trash2 size={14} />
                             </button>
                           </div>
@@ -222,7 +292,7 @@ export default function Favorites() {
                             {channel.logo_url ? (
                               <img 
                                 src={channel.logo_url} 
-                                alt={channel.name} 
+                                alt="" 
                                 loading="lazy"
                                 decoding="async"
                                 className="max-h-full max-w-full object-contain pointer-events-none drop-shadow-lg group-hover:scale-110 transition-transform duration-300"
@@ -245,11 +315,11 @@ export default function Favorites() {
                             </div>
                           </div>
                           
-                          <div className="p-2 border-t border-slate-800/50 flex-1 flex flex-col justify-between">
-                            <h3 className="text-slate-200 font-medium text-xs line-clamp-2 leading-tight group-hover:text-blue-400 transition-colors">
+                          <div className="p-2 border-t border-slate-800/50 flex-1 flex flex-col justify-between overflow-hidden">
+                            <h3 className="text-slate-200 font-medium text-xs truncate group-hover:text-blue-400 transition-colors" title={channel.name}>
                               {channel.name}
                             </h3>
-                            <div className="mt-1 text-[9px] text-slate-500 font-semibold truncate uppercase tracking-wide">
+                            <div className="mt-1 text-[9px] text-slate-500 font-semibold truncate uppercase tracking-wide" title={channel.source_name}>
                               {channel.source_name}
                             </div>
                           </div>
@@ -257,16 +327,16 @@ export default function Favorites() {
                       );
                     }
 
+                    // LIST VIEW ROW
                     return (
                       <div 
                         key={channel.id}
-                        onMouseDown={() => handleTouchStart(channel.stream_url)} 
-                        onMouseUp={handleTouchEnd} 
-                        onMouseLeave={handleTouchEnd} 
-                        onTouchStart={() => handleTouchStart(channel.stream_url)} 
-                        onTouchEnd={handleTouchEnd}
+                        onPointerDown={() => handlePointerDown(channel.stream_url)}
+                        onPointerUp={handlePointerUpOrLeave}
+                        onPointerLeave={handlePointerUpOrLeave}
+                        onPointerCancel={handlePointerUpOrLeave}
                         onClick={(e) => { 
-                          // UPDATED: Now passing the logo_url to the global store
+                          if (isLongPressRef.current) { e.preventDefault(); e.stopPropagation(); return; }
                           if(!isExternalOnly) setPlayingChannel(channel.stream_url, channel.name, channel.logo_url); 
                           else launchExternalPlayer(e, channel.stream_url, channel.name); 
                         }}
@@ -293,27 +363,21 @@ export default function Favorites() {
                           </div>
                           
                           <div className="flex flex-col flex-1 min-w-0 pr-2">
-                            <span className="font-medium text-slate-200 text-base leading-tight truncate group-hover:text-blue-400 transition-colors">
+                            <span className="font-medium text-slate-200 text-base leading-tight truncate group-hover:text-blue-400 transition-colors" title={channel.name}>
                               {channel.name}
                             </span>
-                            <span className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-wider font-semibold mt-1 truncate">
+                            <span className="text-[10px] sm:text-xs text-slate-500 uppercase tracking-wider font-semibold mt-1 truncate" title={channel.source_name}>
                               {channel.source_name}
                             </span>
                           </div>
                         </div>
                         
                         <div className="flex items-center gap-1.5 mt-3 sm:mt-0 ml-[3.75rem] sm:ml-0 shrink-0">
-                          <button 
-                            onClick={(e) => removeFavorite(e, channel.id)} 
-                            className="p-2 sm:p-2.5 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
-                          >
+                          <button onClick={(e) => removeFavorite(e, channel.id)} className="p-2 sm:p-2.5 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors">
                             <Trash2 size={18} />
                           </button>
                           
-                          <button 
-                            onClick={(e) => launchExternalPlayer(e, channel.stream_url, channel.name)} 
-                            className="p-2 sm:p-2.5 bg-slate-800/50 text-slate-300 hover:bg-purple-600 hover:text-white rounded-lg transition-colors"
-                          >
+                          <button onClick={(e) => launchExternalPlayer(e, channel.stream_url, channel.name)} className="p-2 sm:p-2.5 bg-slate-800/50 text-slate-300 hover:bg-purple-600 hover:text-white rounded-lg transition-colors">
                             <ExternalLink size={18} />
                           </button>
                           
@@ -321,7 +385,7 @@ export default function Favorites() {
                             <button 
                               onClick={(e) => { 
                                 e.stopPropagation(); 
-                                // UPDATED: Now passing the logo_url to the global store
+                                if (isLongPressRef.current) return;
                                 setPlayingChannel(channel.stream_url, channel.name, channel.logo_url); 
                               }} 
                               className="p-2 sm:p-2.5 bg-blue-600/10 text-blue-500 hover:bg-blue-600 hover:text-white rounded-lg transition-colors ml-1"

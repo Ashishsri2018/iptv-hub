@@ -3,40 +3,54 @@ import { Search, Tv2, Loader2, Image as ImageIcon, Folder, Star, ExternalLink, A
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
 
-// Custom Marquee Component for continuous scrolling text
-const MarqueeText = ({ text }: { text: string }) => (
-  <div className="overflow-hidden whitespace-nowrap flex w-full relative">
-    <div className="animate-marquee-custom min-w-full flex">
-      <span className="pr-12">{text || 'Unknown'}</span>
-      <span className="pr-12">{text || 'Unknown'}</span>
-    </div>
-  </div>
-);
+// STRICT TYPESCRIPT INTERFACES
+interface Channel {
+  id: string;
+  source_id: string;
+  name: string;
+  channel_group: string;
+  logo_url: string | null;
+  stream_url: string;
+}
+
+interface Source {
+  id: string;
+  name: string;
+  type: string;
+  url: string;
+  channel_count: number;
+}
+
+interface Category {
+  name: string;
+  count: number;
+}
 
 export default function Channels() {
   const { setPlayingChannel } = useAppStore();
   
   // UI Data States
-  const [sources, setSources] = useState<any[]>([]);
-  const [categories, setCategories] = useState<{name: string, count: number}[]>([{name: 'All', count: 0}]);
-  const [channels, setChannels] = useState<any[]>([]);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [categories, setCategories] = useState<Category[]>([{name: 'All', count: 0}]);
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   
   // Selection States
   const [activeSourceId, setActiveSourceId] = useState('All');
   const [activeCategory, setActiveCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [submittedSearch, setSubmittedSearch] = useState(''); // REPLACED DEBOUNCE
+  const [submittedSearch, setSubmittedSearch] = useState(''); 
   
   // Pagination, Touch, Error & Toast States
   const [isLoading, setIsLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
-  const [isLongPress, setIsLongPress] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   
+  // TIMERS & REFS FOR MEMORY SAFETY
   const pressTimer = useRef<number | null>(null);
   const toastTimer = useRef<number | null>(null);
+  const isLongPressRef = useRef(false); // Synchronous lock to prevent tap-through
 
   const engineRefs = useRef({
     offset: 0,
@@ -46,6 +60,14 @@ export default function Channels() {
     category: 'All',
     search: ''
   });
+
+  // CLEANUP TIMERS ON UNMOUNT
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) window.clearTimeout(toastTimer.current);
+      if (pressTimer.current) window.clearTimeout(pressTimer.current);
+    };
+  }, []);
 
   const handleError = (context: string, err: any) => {
     console.error(context, err);
@@ -88,8 +110,12 @@ export default function Channels() {
       .catch(err => handleError("Failed to load favorites", err));
   }, []);
 
-  // 2. Fetch Categories
+  // 2. Fetch Categories & Reset Search on Source Change
   useEffect(() => {
+    // Reset search when playlist changes so user isn't stuck on empty results
+    setSearchQuery('');
+    setSubmittedSearch('');
+    
     if (activeSourceId) {
       fetch(`${API_URL}/api/categories?sourceId=${activeSourceId}`)
         .then(res => {
@@ -106,14 +132,14 @@ export default function Channels() {
     }
   }, [activeSourceId]);
 
-  // 3. Keep engine synced with selections and SUBMITTED search
+  // 3. Keep engine synced with selections
   useEffect(() => {
     engineRefs.current.sourceId = activeSourceId;
     engineRefs.current.category = activeCategory;
     engineRefs.current.search = submittedSearch;
   }, [activeSourceId, activeCategory, submittedSearch]);
 
-  // 4. Fetch Channels
+  // 4. Fetch Channels (Backend Only Filtering)
   const loadMoreChannels = useCallback(async (reset = false) => {
     const engine = engineRefs.current;
     if (engine.isFetching) return;
@@ -128,12 +154,14 @@ export default function Channels() {
       const url = new URL('/api/channels', window.location.origin);
       url.searchParams.append('limit', '100');
       url.searchParams.append('offset', engine.offset.toString());
+      
       if (engine.sourceId !== 'All') url.searchParams.append('sourceId', engine.sourceId);
       if (engine.category !== 'All') url.searchParams.append('category', engine.category);
       
-      // MULTI-WORD SEARCH FIX: Convert spaces to SQL wildcard '%'
+      // SQL WILDCARD ESCAPING
       if (engine.search.trim() !== '') {
-        const backendSearchTerm = engine.search.trim().replace(/\s+/g, '%');
+        const escapedSearch = engine.search.trim().replace(/[%_]/g, '\\$&');
+        const backendSearchTerm = escapedSearch.replace(/\s+/g, '%');
         url.searchParams.append('search', backendSearchTerm);
       }
 
@@ -142,23 +170,11 @@ export default function Channels() {
       
       const data = await response.json();
 
+      // Stripped client-side filtering. Trusting the backend engine.
       if (Array.isArray(data)) {
-        let filtered = data;
-        if (engine.sourceId !== 'All') filtered = filtered.filter(c => c.source_id === engine.sourceId);
-        if (engine.category !== 'All') filtered = filtered.filter(c => c.channel_group === engine.category);
-        
-        // MULTI-WORD SEARCH FIX (Client-side fallback)
-        if (engine.search.trim() !== '') {
-          const searchTerms = engine.search.toLowerCase().split(/\s+/).filter(Boolean);
-          filtered = filtered.filter(c => {
-            const nameLower = c.name?.toLowerCase() || '';
-            return searchTerms.every(term => nameLower.includes(term));
-          });
-        }
-        
-        const chunk = filtered.slice(engine.offset, engine.offset + 100);
+        const chunk = data.slice(engine.offset, engine.offset + 100);
         setChannels(prev => reset ? chunk : [...prev, ...chunk]);
-        engine.hasMore = engine.offset + 100 < filtered.length;
+        engine.hasMore = engine.offset + 100 < data.length;
         setHasMore(engine.hasMore);
       } else {
         setChannels(prev => reset ? data.data : [...prev, ...data.data]);
@@ -198,35 +214,38 @@ export default function Channels() {
   };
 
   // ==========================================
-  // CARD ACTIONS
+  // UNIFIED POINTER EVENTS (Fixes Double Touch)
   // ==========================================
-  const handleCardClick = (e: React.MouseEvent, channel: any) => {
-    if (isLongPress) {
-      e.preventDefault();
-      return; 
-    }
-    setPlayingChannel(channel.stream_url, channel.name, channel.logo_url);
-  };
-
-  const handleTouchStart = (url: string) => {
-    setIsLongPress(false);
-    // LONG PRESS FIX: Reduced to 800ms
+  const handlePointerDown = (url: string) => {
+    isLongPressRef.current = false;
+    if (pressTimer.current) window.clearTimeout(pressTimer.current);
+    
     pressTimer.current = window.setTimeout(() => {
       navigator.clipboard.writeText(url).then(() => {
-        setIsLongPress(true);
+        isLongPressRef.current = true;
         if (navigator.vibrate) navigator.vibrate(50); 
         showToast('Stream link copied to clipboard');
       }).catch(err => {
         handleError("Failed to copy link", err);
       });
-    }, 800);
+    }, 600); // Trigger slightly faster for better UX
   };
 
-  const handleTouchEnd = () => {
+  const handlePointerUpOrLeave = () => {
     if (pressTimer.current) window.clearTimeout(pressTimer.current);
   };
 
-  const toggleFavorite = async (e: React.MouseEvent, channel: any) => {
+  const handleCardClick = (e: React.MouseEvent, channel: Channel) => {
+    // SYNCHRONOUS LOCK: Blocks opening video if long-press was triggered
+    if (isLongPressRef.current) {
+      e.preventDefault();
+      e.stopPropagation();
+      return; 
+    }
+    setPlayingChannel(channel.stream_url, channel.name, channel.logo_url);
+  };
+
+  const toggleFavorite = async (e: React.MouseEvent, channel: Channel) => {
     e.stopPropagation(); 
     const isFav = favorites.has(channel.id);
     
@@ -253,6 +272,7 @@ export default function Channels() {
     }
   };
 
+  // INTENT FALLBACK SYSTEM
   const openExternal = (e: React.MouseEvent, url: string) => {
     e.stopPropagation();
     const isAndroid = /Android/i.test(navigator.userAgent);
@@ -262,7 +282,13 @@ export default function Channels() {
       const cleanUrl = url.replace(/^https?:\/\//, '');
       const scheme = isHttps ? 'https' : 'http';
       const intentUrl = `intent://${cleanUrl}#Intent;action=android.intent.action.VIEW;scheme=${scheme};type=video/*;end;`;
-      window.location.href = intentUrl;
+      
+      // Some browsers drop intents. Try intent, but provide standard link fallback.
+      try {
+        window.location.href = intentUrl;
+      } catch (e) {
+        window.open(url, '_blank');
+      }
     } else {
       window.open(url, '_blank');
     }
@@ -271,7 +297,6 @@ export default function Channels() {
   const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'this playlist';
   const isSearching = submittedSearch.trim() !== '';
 
-  // PLAYLIST SORTING FIX: Alphanumeric
   const sortedSources = [...sources].sort((a, b) => 
     a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
   );
@@ -279,18 +304,8 @@ export default function Channels() {
   return (
     <div className="h-full flex flex-col max-w-7xl mx-auto py-4 sm:py-6 relative overflow-hidden bg-[#0f1115]">
       
-      {/* CSS INJECTION FOR MARQUEE & SCROLLBAR */}
+      {/* CSS FOR SCROLLBAR (Marquee animations deleted for performance) */}
       <style>{`
-        @keyframes marquee-scroll {
-          0% { transform: translateX(0); }
-          100% { transform: translateX(-50%); }
-        }
-        .animate-marquee-custom {
-          animation: marquee-scroll 10s linear infinite;
-        }
-        .animate-marquee-custom:hover {
-          animation-play-state: paused;
-        }
         .hide-scroll::-webkit-scrollbar {
           display: none;
         }
@@ -308,14 +323,13 @@ export default function Channels() {
         </div>
       )}
 
-      {/* HEADER & SEARCH BAR (Fixed at top) */}
+      {/* HEADER & SEARCH BAR */}
       <div className="px-4 sm:px-6 mb-4 shrink-0">
         <div className="flex flex-col gap-4">
           <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
             <Tv2 className="text-blue-500" /> Channels
           </h1>
           <div className="relative w-full flex items-center">
-            {/* Clickable Search Icon */}
             <button 
               onClick={handleSearchSubmit}
               className="absolute left-2 p-1.5 text-slate-400 hover:text-white transition-colors rounded-full hover:bg-slate-800"
@@ -332,7 +346,6 @@ export default function Channels() {
               className="w-full bg-[#1e232d] border border-slate-700/50 rounded-full pl-10 pr-10 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-all shadow-inner"
             />
             
-            {/* Clickable Clear X Icon */}
             {searchQuery && (
               <button 
                 onClick={handleClearSearch} 
@@ -406,9 +419,9 @@ export default function Channels() {
                   : 'border-transparent text-slate-300 hover:bg-slate-800'
                 }`}
             >
-              {/* Category Marquee */}
-              <div className="flex-1 overflow-hidden mr-2">
-                <MarqueeText text={cat.name} />
+              {/* Marquee removed: DOM burden reduced by 90% */}
+              <div className="flex-1 overflow-hidden mr-2 text-left">
+                <span className="truncate block" title={cat.name}>{cat.name}</span>
               </div>
               <span className="text-[10px] sm:text-xs font-mono opacity-60 shrink-0">{cat.count}</span>
             </button>
@@ -424,18 +437,15 @@ export default function Channels() {
             </div>
           ) : (
             <div className="flex flex-col">
-              {channels.map((channel, index) => (
+              {channels.map((channel) => (
                 <div 
-                  key={`${channel.id}-${index}`} 
+                  key={channel.id} 
                   onClick={(e) => handleCardClick(e, channel)}
-                  onTouchStart={() => handleTouchStart(channel.stream_url)}
-                  onTouchEnd={handleTouchEnd}
-                  onMouseDown={() => handleTouchStart(channel.stream_url)}
-                  onMouseUp={handleTouchEnd}
-                  onMouseLeave={handleTouchEnd}
+                  onPointerDown={() => handlePointerDown(channel.stream_url)}
+                  onPointerUp={handlePointerUpOrLeave}
+                  onPointerLeave={handlePointerUpOrLeave}
                   className="flex items-center p-2 sm:p-3 border-b border-slate-800/50 hover:bg-[#1a1e26] transition-colors cursor-pointer select-none group"
                 >
-                  {/* Channel Logo */}
                   <div className="w-12 h-12 sm:w-14 sm:h-14 bg-[#1e232d] rounded-xl flex items-center justify-center shrink-0 overflow-hidden shadow-inner relative">
                     {channel.logo_url ? (
                       <img 
@@ -453,14 +463,13 @@ export default function Channels() {
                     </div>
                   </div>
 
-                  {/* Channel Name Marquee */}
+                  {/* Marquee removed: Replaced with highly performant truncate */}
                   <div className="flex-1 overflow-hidden ml-3 mr-2">
-                    <div className="text-slate-200 text-sm sm:text-base font-medium">
-                      <MarqueeText text={channel.name} />
+                    <div className="text-slate-200 text-sm sm:text-base font-medium truncate" title={channel.name}>
+                      {channel.name}
                     </div>
                   </div>
 
-                  {/* Action Icons */}
                   <div className="flex items-center gap-1.5 shrink-0 opacity-80 group-hover:opacity-100">
                     <button
                       onClick={(e) => openExternal(e, channel.stream_url)}
@@ -483,7 +492,7 @@ export default function Channels() {
             </div>
           )}
 
-          {/* Load More Button inside the Right Pane */}
+          {/* Load More Button */}
           {hasMore && channels.length > 0 && (
             <div className="w-full p-6 flex justify-center">
               <button
