@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { API_URL } from '../config';
-import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles, WifiOff, X } from 'lucide-react';
+import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles, WifiOff, X, RefreshCw } from 'lucide-react';
 import { useAppStore } from '../store';
 
 interface VideoPlayerProps {
@@ -9,7 +9,6 @@ interface VideoPlayerProps {
 }
 
 export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
-  // Added setPlayingChannel so we can close the player from the error screen
   const { channelName, setPlayingChannel } = useAppStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -17,13 +16,19 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
+  
+  // VOLUME PERSISTENCE FIX
+  const [volume, setVolume] = useState(() => {
+    const saved = localStorage.getItem('iptv_volume');
+    return saved !== null ? parseFloat(saved) : 1;
+  });
+  const [isMuted, setIsMuted] = useState(() => localStorage.getItem('iptv_muted') === 'true');
   
   const [hasFatalError, setHasFatalError] = useState(false);
-  
-  // DYNAMIC ERROR STATE
   const [errorUI, setErrorUI] = useState({ title: '', desc: '', raw: '' });
+  
+  // RETRY ENGINE STATE
+  const [retryCount, setRetryCount] = useState(0);
   
   const [progress, setProgress] = useState(0);
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState("00:00");
@@ -33,7 +38,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [showControls, setShowControls] = useState(true);
   const hideControlsTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Menus & Tracks States
   const [activeMenu, setActiveMenu] = useState<'quality' | 'audio' | 'subtitles' | null>(null);
   const activeMenuRef = useRef<'quality' | 'audio' | 'subtitles' | null>(null);
 
@@ -82,6 +86,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     return () => window.removeEventListener('offline', handleOffline);
   }, []);
 
+  // MAIN PLAYER ENGINE (Depends on streamUrl AND retryCount)
   useEffect(() => {
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
@@ -96,6 +101,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
     const video = videoRef.current;
     if (!video) return;
+
+    // Apply saved volume instantly on mount
+    video.volume = volume;
+    video.muted = isMuted;
 
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     const handleLeavePip = () => {
@@ -241,7 +250,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           if (data.fatal) {
             setIsBuffering(false);
             
-            // 1. Check for physical internet drop first
             if (!navigator.onLine) {
               setErrorUI({
                 title: "No Internet Connection",
@@ -253,7 +261,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               return;
             }
 
-            // 2. Identify specific network failures (CORS / 404 / 403)
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               setErrorUI({
                 title: "Connection Refused",
@@ -263,11 +270,9 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               setHasFatalError(true);
               hls.destroy();
             }
-            // 3. Attempt to bypass media corruption
             else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls.recoverMediaError();
             }
-            // 4. Catastrophic parsing/format failures
             else {
               setErrorUI({
                 title: "Playback Error",
@@ -301,6 +306,8 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     initializePlayer();
     startControlHideTimer();
 
+    // The Cleanup function completely destroys the player. 
+    // When retryCount changes, it fires this cleanup, then re-runs the setup above to start completely fresh!
     return () => {
       if (hlsRef.current) {
         hlsRef.current.stopLoad(); 
@@ -315,7 +322,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       video.src = ""; 
       video.load(); 
     };
-  }, [streamUrl]);
+  }, [streamUrl, retryCount]);
 
   // ==========================================
   // CONTROLS & MENUS
@@ -324,6 +331,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     const nextMenu = activeMenu === menu ? null : menu;
     setActiveMenu(nextMenu);
     activeMenuRef.current = nextMenu;
+  };
+
+  const handleRetry = () => {
+    setHasFatalError(false);
+    setErrorUI({ title: '', desc: '', raw: '' });
+    setIsBuffering(true);
+    setRetryCount(prev => prev + 1);
   };
 
   const changeQuality = (levelIndex: number) => {
@@ -387,11 +401,15 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setVolume(val);
+    localStorage.setItem('iptv_volume', val.toString());
+    
     if (videoRef.current) {
       videoRef.current.volume = val;
       videoRef.current.muted = val === 0;
     }
+    
     setIsMuted(val === 0);
+    localStorage.setItem('iptv_muted', (val === 0).toString());
   };
 
   const toggleMute = () => {
@@ -399,10 +417,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       const nextMuted = !videoRef.current.muted;
       videoRef.current.muted = nextMuted;
       setIsMuted(nextMuted);
+      localStorage.setItem('iptv_muted', nextMuted.toString());
       
       if (!nextMuted && volume === 0) {
         setVolume(0.5);
         videoRef.current.volume = 0.5;
+        localStorage.setItem('iptv_volume', '0.5');
       }
     }
   };
@@ -502,7 +522,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       {hasFatalError && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10] text-center p-6 animate-in fade-in duration-300">
           
-          {/* THE NEW CLOSE BUTTON */}
           <button 
             onClick={() => setPlayingChannel('', '', '')}
             className="absolute top-4 right-4 p-2 text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-full transition-colors z-50"
@@ -511,30 +530,36 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             <X size={20} />
           </button>
 
-          {/* DYNAMIC ICON */}
           {errorUI.title === "No Internet Connection" || errorUI.title === "Connection Lost" ? (
             <WifiOff size={64} className="text-red-500 mb-5 drop-shadow-[0_0_15px_rgba(239,68,68,0.3)]" />
           ) : (
             <AlertTriangle size={64} className="text-yellow-500 mb-5 drop-shadow-[0_0_15px_rgba(234,179,8,0.3)]" />
           )}
           
-          {/* DYNAMIC TEXT */}
           <h3 className="text-2xl font-bold text-white mb-2 tracking-wide">{errorUI.title}</h3>
           <p className="text-slate-300 mb-6 max-w-md text-sm sm:text-base leading-relaxed">
             {errorUI.desc}
           </p>
           
-          {/* TECHNICAL DETAILS */}
           <div className="bg-black/50 border border-slate-800/50 rounded-lg p-3.5 mb-8 w-full max-w-lg shadow-inner">
             <p className="text-red-400 font-mono text-xs break-all text-left">{errorUI.raw}</p>
           </div>
           
-          <button 
-            onClick={launchExternalPlayer} 
-            className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-all shadow-[0_0_20px_rgba(37,99,235,0.3)] hover:scale-105 active:scale-95"
-          >
-            <ExternalLink size={20} /> Open in External Player
-          </button>
+          <div className="flex flex-col sm:flex-row items-center gap-4 w-full sm:w-auto max-w-sm">
+            <button 
+              onClick={handleRetry} 
+              className="px-6 py-3.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-all shadow-[0_0_20px_rgba(0,0,0,0.3)] hover:scale-105 active:scale-95 border border-slate-700 w-full sm:w-auto justify-center"
+            >
+              <RefreshCw size={20} /> Retry Connection
+            </button>
+
+            <button 
+              onClick={launchExternalPlayer} 
+              className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center gap-3 transition-all shadow-[0_0_20px_rgba(37,99,235,0.3)] hover:scale-105 active:scale-95 w-full sm:w-auto justify-center"
+            >
+              <ExternalLink size={20} /> Open External
+            </button>
+          </div>
         </div>
       )}
 
