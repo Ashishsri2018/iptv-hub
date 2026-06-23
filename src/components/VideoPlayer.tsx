@@ -17,7 +17,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
   
-  // VOLUME PERSISTENCE FIX
   const [volume, setVolume] = useState(() => {
     const saved = localStorage.getItem('iptv_volume');
     return saved !== null ? parseFloat(saved) : 1;
@@ -26,8 +25,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   
   const [hasFatalError, setHasFatalError] = useState(false);
   const [errorUI, setErrorUI] = useState({ title: '', desc: '', raw: '' });
-  
-  // RETRY ENGINE STATE
   const [retryCount, setRetryCount] = useState(0);
   
   const [progress, setProgress] = useState(0);
@@ -70,7 +67,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  // REAL-TIME INTERNET CONNECTION LISTENER
   useEffect(() => {
     const handleOffline = () => {
       setErrorUI({
@@ -86,12 +82,18 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     return () => window.removeEventListener('offline', handleOffline);
   }, []);
 
-  // MAIN PLAYER ENGINE (Depends on streamUrl AND retryCount)
+  // MAIN PLAYER ENGINE
   useEffect(() => {
+    let isMounted = true; // Prevents race conditions during rapid channel switching
+
+    // Purge old states on load
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
     setActiveMenu(null);
     setAutoLevel(-1);
+    setLevels([]);
+    setAudioTracks([]);
+    setSubtitleTracks([]);
     activeMenuRef.current = null;
     
     if (containerRef.current) {
@@ -102,10 +104,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     const video = videoRef.current;
     if (!video) return;
 
-    // Apply saved volume instantly on mount
     video.volume = volume;
     video.muted = isMuted;
 
+    // EVENT SYNC: Ties React State directly to Native Video DOM State
+    const handleNativePlay = () => setIsPlaying(true);
+    const handleNativePause = () => setIsPlaying(false);
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     const handleLeavePip = () => {
       setTimeout(() => {
@@ -121,8 +125,25 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       }, 100);
     };
 
+    video.addEventListener('play', handleNativePlay);
+    video.addEventListener('pause', handleNativePause);
     video.addEventListener('enterpictureinpicture', handleEnterPip);
     video.addEventListener('leavepictureinpicture', handleLeavePip);
+
+    // Safari Native Handlers
+    const handleNativeMeta = () => {
+      setIsBuffering(false);
+      video.play().catch(() => setIsPlaying(false));
+    };
+    const handleNativeError = () => {
+      setIsBuffering(false);
+      if (!navigator.onLine) {
+        setErrorUI({ title: "No Internet Connection", desc: "You are offline.", raw: "ERR_INTERNET_DISCONNECTED" });
+      } else {
+        setErrorUI({ title: "Playback Error", desc: "The media format is unsupported by your browser or the connection failed.", raw: "Native Browser Error (MEDIA_ERR)" });
+      }
+      setHasFatalError(true);
+    };
 
     const initializePlayer = async () => {
       let defaultQuality = 'auto';
@@ -131,13 +152,14 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
       try {
         const res = await fetch(`${API_URL}/api/settings`);
+        if (!isMounted) return; 
         if (res.ok) {
           const data = await res.json();
           defaultQuality = data.default_quality || 'auto';
           defaultAudio = data.default_audio || '';
           defaultSubtitle = data.default_subtitle || '';
         }
-      } catch (e: any) { 
+      } catch (e) { 
         console.error("Settings Fetch Error:", e); 
       }
 
@@ -151,11 +173,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         let initialAudioSet = false;
         let initialSubSet = false;
 
-        hls.on(Hls.Events.MANIFEST_PARSED, (_: any, data: any) => {
-          setLevels(data.levels);
+        hls.on(Hls.Events.MANIFEST_PARSED, (_event: string, data: Record<string, any>) => {
+          setLevels(data.levels || []);
           
           let targetLevel = -1; 
-          if (data.levels.length > 0) {
+          if (data.levels && data.levels.length > 0) {
             if (defaultQuality === 'high') targetLevel = data.levels.length - 1;
             else if (defaultQuality === 'low') targetLevel = 0;
           }
@@ -203,70 +225,62 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           video.play().catch(() => setIsPlaying(false));
         });
 
-        if ((Hls.Events as any).LEVEL_SWITCHED) {
-          hls.on((Hls.Events as any).LEVEL_SWITCHED, (_: any, data: any) => {
-            setAutoLevel(data.level);
-          });
-        }
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_event: string, data: Record<string, any>) => {
+          setAutoLevel(data.level);
+        });
 
-        if ((Hls.Events as any).AUDIO_TRACKS_UPDATED) {
-          hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_: any, data: any) => {
-            const tracks = data.audioTracks || [];
-            setAudioTracks(tracks);
-            if (defaultAudio && !initialAudioSet && tracks.length > 0) {
-              const idx = tracks.findIndex((t: any) => 
-                t.name?.toLowerCase().includes(defaultAudio.toLowerCase()) || 
-                t.lang?.toLowerCase().includes(defaultAudio.toLowerCase())
-              );
-              if (idx !== -1) {
-                hls.audioTrack = idx;
-                setCurrentAudioTrack(idx);
-                initialAudioSet = true;
-              }
+        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event: string, data: Record<string, any>) => {
+          const tracks = data.audioTracks || [];
+          setAudioTracks(tracks);
+          if (defaultAudio && !initialAudioSet && tracks.length > 0) {
+            const idx = tracks.findIndex((t: any) => 
+              t.name?.toLowerCase().includes(defaultAudio.toLowerCase()) || 
+              t.lang?.toLowerCase().includes(defaultAudio.toLowerCase())
+            );
+            if (idx !== -1) {
+              hls.audioTrack = idx;
+              setCurrentAudioTrack(idx);
+              initialAudioSet = true;
             }
-          });
-        }
+          }
+        });
 
-        if ((Hls.Events as any).SUBTITLE_TRACKS_UPDATED) {
-          hls.on((Hls.Events as any).SUBTITLE_TRACKS_UPDATED, (_: any, data: any) => {
-            const tracks = data.subtitleTracks || [];
-            setSubtitleTracks(tracks);
-            if (defaultSubtitle && !initialSubSet && tracks.length > 0) {
-              const idx = tracks.findIndex((t: any) => 
-                t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
-                t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
-              );
-              if (idx !== -1) {
-                hls.subtitleTrack = idx;
-                setCurrentSubtitleTrack(idx);
-                initialSubSet = true;
-              }
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event: string, data: Record<string, any>) => {
+          const tracks = data.subtitleTracks || [];
+          setSubtitleTracks(tracks);
+          if (defaultSubtitle && !initialSubSet && tracks.length > 0) {
+            const idx = tracks.findIndex((t: any) => 
+              t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
+              t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
+            );
+            if (idx !== -1) {
+              hls.subtitleTrack = idx;
+              setCurrentSubtitleTrack(idx);
+              initialSubSet = true;
             }
-          });
-        }
+          }
+        });
 
-        // INTELLIGENT ERROR PARSING
-        hls.on(Hls.Events.ERROR, (_: any, data: any) => {
+        let internalNetworkRetries = 0;
+        hls.on(Hls.Events.ERROR, (_event: string, data: Record<string, any>) => {
           if (data.fatal) {
             setIsBuffering(false);
             
             if (!navigator.onLine) {
-              setErrorUI({
-                title: "No Internet Connection",
-                desc: "You appear to be offline. Please check your network connection and try again.",
-                raw: "ERR_INTERNET_DISCONNECTED"
-              });
+              setErrorUI({ title: "No Internet Connection", desc: "You appear to be offline.", raw: "ERR_INTERNET_DISCONNECTED" });
               setHasFatalError(true);
               hls.destroy();
               return;
             }
 
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              setErrorUI({
-                title: "Connection Refused",
-                desc: "The stream server rejected the request. This is usually caused by strict browser security (CORS) or a dead link.",
-                raw: `Network Error: ${data.details}`
-              });
+              // INVISIBLE RECOVERY ENGINE
+              if (internalNetworkRetries < 3) {
+                internalNetworkRetries++;
+                hls.startLoad();
+                return;
+              }
+              setErrorUI({ title: "Connection Refused", desc: "The stream server rejected the request. This is usually caused by strict browser security (CORS) or a dead link.", raw: `Network Error: ${data.details}` });
               setHasFatalError(true);
               hls.destroy();
             }
@@ -274,11 +288,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               hls.recoverMediaError();
             }
             else {
-              setErrorUI({
-                title: "Playback Error",
-                desc: "The video format is not supported or the stream data is corrupted.",
-                raw: `Media Error: ${data.details}`
-              });
+              setErrorUI({ title: "Playback Error", desc: "The video format is not supported or the stream data is corrupted.", raw: `Media Error: ${data.details}` });
               setHasFatalError(true);
               hls.destroy();
             }
@@ -287,40 +297,35 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       } 
       else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = streamUrl;
-        video.addEventListener('loadedmetadata', () => {
-          setIsBuffering(false);
-          video.play().catch(() => setIsPlaying(false));
-        });
-        video.addEventListener('error', () => {
-          setIsBuffering(false);
-          if (!navigator.onLine) {
-            setErrorUI({ title: "No Internet Connection", desc: "You are offline.", raw: "ERR_INTERNET_DISCONNECTED" });
-          } else {
-            setErrorUI({ title: "Playback Error", desc: "The media format is unsupported by your browser or the connection failed.", raw: "Native Browser Error (MEDIA_ERR)" });
-          }
-          setHasFatalError(true);
-        });
+        video.addEventListener('loadedmetadata', handleNativeMeta);
+        video.addEventListener('error', handleNativeError);
       }
     };
 
     initializePlayer();
     startControlHideTimer();
 
-    // The Cleanup function completely destroys the player. 
-    // When retryCount changes, it fires this cleanup, then re-runs the setup above to start completely fresh!
     return () => {
+      isMounted = false; // Kill fetching race condition
       if (hlsRef.current) {
         hlsRef.current.stopLoad(); 
         hlsRef.current.detachMedia();
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
+      
+      // Remove all event listeners cleanly
+      video.removeEventListener('play', handleNativePlay);
+      video.removeEventListener('pause', handleNativePause);
       video.removeEventListener('enterpictureinpicture', handleEnterPip);
       video.removeEventListener('leavepictureinpicture', handleLeavePip);
+      video.removeEventListener('loadedmetadata', handleNativeMeta);
+      video.removeEventListener('error', handleNativeError);
+      
       if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
-      video.pause();
-      video.src = ""; 
-      video.load(); 
+      
+      // Graceful Teardown
+      video.removeAttribute('src'); 
     };
   }, [streamUrl, retryCount]);
 
@@ -343,6 +348,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
       hlsRef.current.currentLevel = levelIndex;
+      // Force ABR reactivation when Auto (-1) is selected
+      if (levelIndex === -1) {
+        hlsRef.current.nextLoadLevel = -1;
+        hlsRef.current.loadLevel = -1;
+      }
       setCurrentLevel(levelIndex);
       setActiveMenu(null);
       activeMenuRef.current = null;
@@ -388,13 +398,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   };
 
   const togglePlay = () => {
-    if (hasFatalError) return;
-    if (videoRef.current?.paused) {
-      videoRef.current.play();
-      setIsPlaying(true);
+    if (hasFatalError || !videoRef.current) return;
+    if (videoRef.current.paused) {
+      videoRef.current.play().catch(() => {});
     } else {
-      videoRef.current?.pause();
-      setIsPlaying(false);
+      videoRef.current.pause();
     }
   };
 
@@ -405,11 +413,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     
     if (videoRef.current) {
       videoRef.current.volume = val;
-      videoRef.current.muted = val === 0;
+      const willMute = val === 0;
+      videoRef.current.muted = willMute;
+      setIsMuted(willMute);
+      localStorage.setItem('iptv_muted', willMute.toString());
     }
-    
-    setIsMuted(val === 0);
-    localStorage.setItem('iptv_muted', (val === 0).toString());
   };
 
   const toggleMute = () => {
@@ -419,10 +427,12 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       setIsMuted(nextMuted);
       localStorage.setItem('iptv_muted', nextMuted.toString());
       
-      if (!nextMuted && volume === 0) {
-        setVolume(0.5);
-        videoRef.current.volume = 0.5;
-        localStorage.setItem('iptv_volume', '0.5');
+      if (!nextMuted) {
+        let restoredVolume = volume;
+        if (restoredVolume === 0) restoredVolume = 0.5;
+        setVolume(restoredVolume);
+        videoRef.current.volume = restoredVolume;
+        localStorage.setItem('iptv_volume', restoredVolume.toString());
       }
     }
   };
@@ -456,19 +466,28 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const toggleFullScreen = async () => {
     if (!document.fullscreenElement) {
       try {
-        await containerRef.current?.requestFullscreen();
-        try { await (window.screen.orientation as any).lock('landscape'); } catch (err) {}
+        if (containerRef.current) {
+          await containerRef.current.requestFullscreen();
+          try { await (window.screen.orientation as any).lock('landscape'); } catch (err) {}
+        }
       } catch (e: any) { 
         console.warn("Fullscreen Error:", e); 
       }
     } else {
-      document.exitFullscreen().catch(e => console.warn(e));
+      try { await document.exitFullscreen(); } catch(e) {}
     }
   };
 
-  const togglePiP = () => {
-    if (document.pictureInPictureElement) document.exitPictureInPicture();
-    else videoRef.current?.requestPictureInPicture();
+  const togglePiP = async () => {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else if (videoRef.current) {
+        await videoRef.current.requestPictureInPicture();
+      }
+    } catch (error) {
+      console.warn("PiP Error:", error);
+    }
   };
 
   const launchExternalPlayer = () => {
