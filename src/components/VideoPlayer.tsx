@@ -48,7 +48,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const [subtitleTracks, setSubtitleTracks] = useState<any[]>([]);
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
   
-  // PROTECTS MANUAL USER CLICKS FROM BACKGROUND METADATA UPDATES
   const userTouchedSubtitles = useRef(false);
 
   const formatTime = (seconds: number) => {
@@ -97,7 +96,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     setAudioTracks([]);
     setSubtitleTracks([]);
     activeMenuRef.current = null;
-    userTouchedSubtitles.current = false; // Reset lock on new video
+    userTouchedSubtitles.current = false; 
     
     if (containerRef.current) {
       containerRef.current.style.opacity = '1';
@@ -178,25 +177,24 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         const processSubtitles = (tracks: any[]) => {
           setSubtitleTracks(tracks);
           
-          if (userTouchedSubtitles.current) return; // Abort if user clicked a subtitle manually
+          if (userTouchedSubtitles.current) return; 
           
           if (tracks.length > 0) {
+            let targetIdx = -1;
+            
             if (defaultSubtitle) {
-              const idx = tracks.findIndex(t => 
+              targetIdx = tracks.findIndex(t => 
                 t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
                 t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
               );
-              if (idx !== -1) {
-                hls.subtitleTrack = idx;
-                setCurrentSubtitleTrack(idx);
-              } else {
-                hls.subtitleTrack = -1; // Explicitly turn off engine
-                setCurrentSubtitleTrack(-1);
-              }
-            } else {
-              hls.subtitleTrack = -1; // Explicitly turn off engine
-              setCurrentSubtitleTrack(-1);
             }
+            
+            // Explicitly force HLS rendering ON if target is valid, OFF if target is -1
+            hls.subtitleTrack = targetIdx;
+            if (hls.subtitleDisplay !== undefined) {
+              hls.subtitleDisplay = targetIdx !== -1;
+            }
+            setCurrentSubtitleTrack(targetIdx);
           }
         };
 
@@ -372,7 +370,11 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const changeSubtitleTrack = (trackIndex: number) => {
     if (hlsRef.current) {
+      // PROPER SUBTITLE TOGGLE LOGIC
       hlsRef.current.subtitleTrack = trackIndex;
+      if (hlsRef.current.subtitleDisplay !== undefined) {
+        hlsRef.current.subtitleDisplay = trackIndex !== -1;
+      }
       setCurrentSubtitleTrack(trackIndex);
       
       // LOCK BACKGROUND OVERRIDES
