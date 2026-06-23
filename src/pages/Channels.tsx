@@ -26,6 +26,38 @@ interface Category {
   count: number;
 }
 
+// INTELLIGENT MARQUEE: Only animates if text physically overflows the container
+const SmartMarquee = ({ text, className = "" }: { text: string, className?: string }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+
+  useEffect(() => {
+    setIsOverflowing(false); 
+  }, [text]);
+
+  useEffect(() => {
+    if (!isOverflowing && containerRef.current && textRef.current) {
+      if (textRef.current.scrollWidth > containerRef.current.clientWidth) {
+        setIsOverflowing(true);
+      }
+    }
+  }, [text, isOverflowing]);
+
+  return (
+    <div ref={containerRef} className={`overflow-hidden flex w-full ${className}`} title={text}>
+      {isOverflowing ? (
+        <div className="animate-marquee-custom flex min-w-max">
+          <span className="pr-12">{text}</span>
+          <span className="pr-12">{text}</span>
+        </div>
+      ) : (
+        <span ref={textRef} className="truncate block w-full">{text}</span>
+      )}
+    </div>
+  );
+};
+
 export default function Channels() {
   const { setPlayingChannel } = useAppStore();
   
@@ -35,8 +67,8 @@ export default function Channels() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   
-  // Selection States
-  const [activeSourceId, setActiveSourceId] = useState('All');
+  // Selection States (Initialized to null to prevent "All" flicker)
+  const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [submittedSearch, setSubmittedSearch] = useState(''); 
@@ -50,13 +82,13 @@ export default function Channels() {
   // TIMERS & REFS FOR MEMORY SAFETY
   const pressTimer = useRef<number | null>(null);
   const toastTimer = useRef<number | null>(null);
-  const isLongPressRef = useRef(false); // Synchronous lock to prevent tap-through
+  const isLongPressRef = useRef(false);
 
   const engineRefs = useRef({
     offset: 0,
     isFetching: false,
     hasMore: true,
-    sourceId: 'All',
+    sourceId: null as string | null,
     category: 'All',
     search: ''
   });
@@ -77,12 +109,10 @@ export default function Channels() {
   const showToast = (msg: string) => {
     setToastMessage(msg);
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => {
-      setToastMessage(null);
-    }, 3000); 
+    toastTimer.current = window.setTimeout(() => setToastMessage(null), 3000); 
   };
 
-  // 1. Fetch Sources & Favorites on initial load
+  // 1. Fetch Sources & Determine Default Alphabetical Playlist
   useEffect(() => {
     fetch(`${API_URL}/api/sources`)
       .then(res => {
@@ -92,7 +122,12 @@ export default function Channels() {
       .then(data => {
         if (Array.isArray(data)) {
           setSources(data);
-          if (data.length > 0) setActiveSourceId(data[0].id);
+          if (data.length > 0) {
+            const sorted = [...data].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+            setActiveSourceId(sorted[0].id); // Lock to first alphabetical source instantly
+          } else {
+            setActiveSourceId('All');
+          }
         }
       })
       .catch(err => handleError("Failed to load playlists", err));
@@ -112,11 +147,10 @@ export default function Channels() {
 
   // 2. Fetch Categories & Reset Search on Source Change
   useEffect(() => {
-    // Reset search when playlist changes so user isn't stuck on empty results
     setSearchQuery('');
     setSubmittedSearch('');
     
-    if (activeSourceId) {
+    if (activeSourceId && activeSourceId !== 'All') {
       fetch(`${API_URL}/api/categories?sourceId=${activeSourceId}`)
         .then(res => {
           if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
@@ -129,6 +163,9 @@ export default function Channels() {
           }
         })
         .catch(err => handleError("Failed to load categories", err));
+    } else {
+      setCategories([{name: 'All', count: 0}]);
+      setActiveCategory('All');
     }
   }, [activeSourceId]);
 
@@ -142,6 +179,10 @@ export default function Channels() {
   // 4. Fetch Channels (Backend Only Filtering)
   const loadMoreChannels = useCallback(async (reset = false) => {
     const engine = engineRefs.current;
+    
+    // THE FIX: Block fetch until the default alphabetical playlist has been calculated
+    if (engine.sourceId === null) return; 
+    
     if (engine.isFetching) return;
     if (!reset && !engine.hasMore) return;
 
@@ -158,7 +199,6 @@ export default function Channels() {
       if (engine.sourceId !== 'All') url.searchParams.append('sourceId', engine.sourceId);
       if (engine.category !== 'All') url.searchParams.append('category', engine.category);
       
-      // SQL WILDCARD ESCAPING
       if (engine.search.trim() !== '') {
         const escapedSearch = engine.search.trim().replace(/[%_]/g, '\\$&');
         const backendSearchTerm = escapedSearch.replace(/\s+/g, '%');
@@ -170,7 +210,6 @@ export default function Channels() {
       
       const data = await response.json();
 
-      // Stripped client-side filtering. Trusting the backend engine.
       if (Array.isArray(data)) {
         const chunk = data.slice(engine.offset, engine.offset + 100);
         setChannels(prev => reset ? chunk : [...prev, ...chunk]);
@@ -195,27 +234,10 @@ export default function Channels() {
     loadMoreChannels(true);
   }, [activeSourceId, activeCategory, submittedSearch, loadMoreChannels]);
 
-  // ==========================================
-  // SEARCH ACTIONS
-  // ==========================================
-  const handleSearchSubmit = () => {
-    setSubmittedSearch(searchQuery);
-  };
+  const handleSearchSubmit = () => setSubmittedSearch(searchQuery);
+  const handleClearSearch = () => { setSearchQuery(''); setSubmittedSearch(''); };
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') handleSearchSubmit(); };
 
-  const handleClearSearch = () => {
-    setSearchQuery('');
-    setSubmittedSearch('');
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      handleSearchSubmit();
-    }
-  };
-
-  // ==========================================
-  // UNIFIED POINTER EVENTS (Fixes Double Touch)
-  // ==========================================
   const handlePointerDown = (url: string) => {
     isLongPressRef.current = false;
     if (pressTimer.current) window.clearTimeout(pressTimer.current);
@@ -228,7 +250,7 @@ export default function Channels() {
       }).catch(err => {
         handleError("Failed to copy link", err);
       });
-    }, 600); // Trigger slightly faster for better UX
+    }, 600);
   };
 
   const handlePointerUpOrLeave = () => {
@@ -236,7 +258,6 @@ export default function Channels() {
   };
 
   const handleCardClick = (e: React.MouseEvent, channel: Channel) => {
-    // SYNCHRONOUS LOCK: Blocks opening video if long-press was triggered
     if (isLongPressRef.current) {
       e.preventDefault();
       e.stopPropagation();
@@ -272,7 +293,6 @@ export default function Channels() {
     }
   };
 
-  // INTENT FALLBACK SYSTEM
   const openExternal = (e: React.MouseEvent, url: string) => {
     e.stopPropagation();
     const isAndroid = /Android/i.test(navigator.userAgent);
@@ -282,19 +302,13 @@ export default function Channels() {
       const cleanUrl = url.replace(/^https?:\/\//, '');
       const scheme = isHttps ? 'https' : 'http';
       const intentUrl = `intent://${cleanUrl}#Intent;action=android.intent.action.VIEW;scheme=${scheme};type=video/*;end;`;
-      
-      // Some browsers drop intents. Try intent, but provide standard link fallback.
-      try {
-        window.location.href = intentUrl;
-      } catch (e) {
-        window.open(url, '_blank');
-      }
+      try { window.location.href = intentUrl; } catch (e) { window.open(url, '_blank'); }
     } else {
       window.open(url, '_blank');
     }
   };
 
-  const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'this playlist';
+  const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'loading...';
   const isSearching = submittedSearch.trim() !== '';
 
   const sortedSources = [...sources].sort((a, b) => 
@@ -304,18 +318,19 @@ export default function Channels() {
   return (
     <div className="h-full flex flex-col max-w-7xl mx-auto py-4 sm:py-6 relative overflow-hidden bg-[#0f1115]">
       
-      {/* CSS FOR SCROLLBAR (Marquee animations deleted for performance) */}
+      {/* CSS KEYFRAMES FOR SMART MARQUEE */}
       <style>{`
-        .hide-scroll::-webkit-scrollbar {
-          display: none;
+        .hide-scroll::-webkit-scrollbar { display: none; }
+        .hide-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes marquee-custom {
+          0% { transform: translateX(0%); }
+          100% { transform: translateX(-50%); }
         }
-        .hide-scroll {
-          -ms-overflow-style: none;
-          scrollbar-width: none;
+        .animate-marquee-custom {
+          animation: marquee-custom 12s linear infinite;
         }
       `}</style>
 
-      {/* FLOATING TOAST BANNER */}
       {toastMessage && (
         <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] bg-slate-800 text-slate-200 px-5 py-2.5 rounded-full shadow-[0_10px_40px_rgba(0,0,0,0.5)] border border-slate-700 font-medium text-sm flex items-center gap-2 animate-in slide-in-from-bottom-4 fade-in duration-300">
           <Check className="text-blue-500" size={16} />
@@ -323,20 +338,15 @@ export default function Channels() {
         </div>
       )}
 
-      {/* HEADER & SEARCH BAR */}
       <div className="px-4 sm:px-6 mb-4 shrink-0">
         <div className="flex flex-col gap-4">
           <h1 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
             <Tv2 className="text-blue-500" /> Channels
           </h1>
           <div className="relative w-full flex items-center">
-            <button 
-              onClick={handleSearchSubmit}
-              className="absolute left-2 p-1.5 text-slate-400 hover:text-white transition-colors rounded-full hover:bg-slate-800"
-            >
+            <button onClick={handleSearchSubmit} className="absolute left-2 p-1.5 text-slate-400 hover:text-white transition-colors rounded-full hover:bg-slate-800">
               <Search size={18} />
             </button>
-            
             <input
               type="text"
               placeholder={`Search in ${activeSourceName}... (Press Enter)`}
@@ -345,12 +355,8 @@ export default function Channels() {
               onKeyDown={handleKeyDown}
               className="w-full bg-[#1e232d] border border-slate-700/50 rounded-full pl-10 pr-10 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 transition-all shadow-inner"
             />
-            
             {searchQuery && (
-              <button 
-                onClick={handleClearSearch} 
-                className="absolute right-3 p-1.5 text-slate-400 hover:text-white transition-colors bg-slate-800 hover:bg-slate-700 rounded-full"
-              >
+              <button onClick={handleClearSearch} className="absolute right-3 p-1.5 text-slate-400 hover:text-white transition-colors bg-slate-800 hover:bg-slate-700 rounded-full">
                 <X size={14} />
               </button>
             )}
@@ -358,7 +364,6 @@ export default function Channels() {
         </div>
       </div>
 
-      {/* ERROR BANNER */}
       {errorMessage && (
         <div className="mx-4 sm:mx-6 mb-4 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 flex items-start sm:items-center justify-between gap-3 animate-in fade-in shrink-0">
           <div className="flex items-center gap-3">
@@ -371,7 +376,6 @@ export default function Channels() {
         </div>
       )}
 
-      {/* PLAYLIST TABS (Horizontal Scroll) */}
       <div className="px-4 sm:px-6 mb-2 shrink-0">
         <div className="flex overflow-x-auto pb-3 gap-2 hide-scroll border-b border-slate-800/50">
           {sortedSources.length > 1 && (
@@ -402,33 +406,23 @@ export default function Channels() {
         </div>
       )}
 
-      {/* ========================================== */}
-      {/* SIDE-BY-SIDE SPLIT LAYOUT */}
-      {/* ========================================== */}
       <div className="flex-1 flex overflow-hidden w-full relative">
-        
-        {/* LEFT PANE: Categories Column */}
         <div className="w-[38%] sm:w-56 flex flex-col border-r border-slate-800/50 bg-[#12141a] overflow-y-auto hide-scroll pb-24">
           {categories.map((cat) => (
             <button
               key={cat.name}
               onClick={() => setActiveCategory(cat.name)}
               className={`flex items-center justify-between px-3 py-3.5 text-sm transition-colors border-l-2
-                ${activeCategory === cat.name 
-                  ? 'bg-[#2a303c] border-blue-500 text-blue-400' 
-                  : 'border-transparent text-slate-300 hover:bg-slate-800'
-                }`}
+                ${activeCategory === cat.name ? 'bg-[#2a303c] border-blue-500 text-blue-400' : 'border-transparent text-slate-300 hover:bg-slate-800'}`}
             >
-              {/* Marquee removed: DOM burden reduced by 90% */}
               <div className="flex-1 overflow-hidden mr-2 text-left">
-                <span className="truncate block" title={cat.name}>{cat.name}</span>
+                <SmartMarquee text={cat.name} />
               </div>
               <span className="text-[10px] sm:text-xs font-mono opacity-60 shrink-0">{cat.count}</span>
             </button>
           ))}
         </div>
 
-        {/* RIGHT PANE: Channels List Column */}
         <div className="flex-1 flex flex-col bg-[#0f1115] overflow-y-auto hide-scroll pb-24 relative">
           {channels.length === 0 && !isLoading ? (
             <div className="flex flex-col items-center justify-center h-full text-slate-500 p-4 text-center">
@@ -463,28 +457,16 @@ export default function Channels() {
                     </div>
                   </div>
 
-                  {/* Marquee removed: Replaced with highly performant truncate */}
                   <div className="flex-1 overflow-hidden ml-3 mr-2">
-                    <div className="text-slate-200 text-sm sm:text-base font-medium truncate" title={channel.name}>
-                      {channel.name}
-                    </div>
+                    <SmartMarquee text={channel.name} className="text-slate-200 text-sm sm:text-base font-medium" />
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0 opacity-80 group-hover:opacity-100">
-                    <button
-                      onClick={(e) => openExternal(e, channel.stream_url)}
-                      className="p-2 sm:p-2.5 bg-[#171a21] hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-colors"
-                    >
+                    <button onClick={(e) => openExternal(e, channel.stream_url)} className="p-2 sm:p-2.5 bg-[#171a21] hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-colors">
                       <ExternalLink size={16} />
                     </button>
-                    <button
-                      onClick={(e) => toggleFavorite(e, channel)}
-                      className="p-2 sm:p-2.5 bg-[#171a21] hover:bg-slate-700 rounded-lg transition-colors"
-                    >
-                      <Star 
-                        size={16} 
-                        className={favorites.has(channel.id) ? "fill-yellow-400 text-yellow-400" : "text-slate-300 hover:text-white"} 
-                      />
+                    <button onClick={(e) => toggleFavorite(e, channel)} className="p-2 sm:p-2.5 bg-[#171a21] hover:bg-slate-700 rounded-lg transition-colors">
+                      <Star size={16} className={favorites.has(channel.id) ? "fill-yellow-400 text-yellow-400" : "text-slate-300 hover:text-white"} />
                     </button>
                   </div>
                 </div>
@@ -492,7 +474,6 @@ export default function Channels() {
             </div>
           )}
 
-          {/* Load More Button */}
           {hasMore && channels.length > 0 && (
             <div className="w-full p-6 flex justify-center">
               <button
@@ -500,13 +481,7 @@ export default function Channels() {
                 disabled={isLoading}
                 className="px-6 py-2.5 bg-[#1e232d] hover:bg-slate-700 text-slate-200 text-sm font-medium rounded-full border border-slate-700 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
               >
-                {isLoading ? (
-                  <>
-                    <Loader2 className="animate-spin text-blue-500" size={18} /> Loading...
-                  </>
-                ) : (
-                  'Load More'
-                )}
+                {isLoading ? <><Loader2 className="animate-spin text-blue-500" size={18} /> Loading...</> : 'Load More'}
               </button>
             </div>
           )}
