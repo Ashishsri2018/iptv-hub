@@ -13,14 +13,13 @@ interface FavoriteChannel {
 }
 
 export default function Favorites() {
-  const { playChannel } = useAppStore();
+  // UPDATED: Destructure setPlayingChannel instead of playChannel
+  const { setPlayingChannel } = useAppStore();
   const [favorites, setFavorites] = useState<FavoriteChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   
-  // View Mode State
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
-  
   const [toast, setToast] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -96,7 +95,6 @@ export default function Favorites() {
         targetUrl = `vlc://${url}`;
       }
 
-      // Open seamlessly in the same window to allow OS interception
       window.location.href = targetUrl;
       showToast("Launching Player...", 'success');
     } catch (error: any) {
@@ -105,14 +103,11 @@ export default function Favorites() {
     }
   };
 
-  // SEARCH FIX: Clean trailing spaces and handle multi-word perfectly
   const searchResults = useMemo(() => {
     const cleanQuery = searchQuery.trim();
     if (!cleanQuery) return favorites;
     
     const fuse = new Fuse(favorites, { keys: ['name', 'source_name'], threshold: 0.3, useExtendedSearch: true });
-    
-    // Split by any number of spaces, map to Fuse.js exact-match format
     const formattedQuery = cleanQuery.split(/\s+/).map(word => `'${word}`).join(' ');
     return fuse.search(formattedQuery).map(res => res.item);
   }, [favorites, searchQuery]);
@@ -136,7 +131,6 @@ export default function Favorites() {
     <div className="flex flex-col h-full bg-[#0f1115] relative">
       <div className="p-4 sm:p-6 border-b border-slate-800/50 bg-[#12141a] shrink-0 z-10 shadow-sm">
         
-        {/* HEADER & VIEW TOGGLE */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
           <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-2">
             <Star className="text-yellow-400 fill-yellow-400" /> Favorites
@@ -160,7 +154,6 @@ export default function Favorites() {
           </div>
         </div>
         
-        {/* SEARCH BAR */}
         <div className="relative w-full flex items-center">
           <Search className="absolute left-3 text-slate-400" size={18} />
           <input 
@@ -187,7 +180,6 @@ export default function Favorites() {
               <div key={group.letter} className="mb-8">
                 <h3 className="text-2xl font-bold text-slate-100 mb-4 border-b border-slate-800/50 pb-2 inline-block min-w-[3rem]">{group.letter}</h3>
                 
-                {/* DYNAMIC RENDER BASED ON VIEW MODE */}
                 <div className={viewMode === 'grid' 
                   ? "grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2 sm:gap-3" 
                   : "space-y-2 sm:space-y-3"
@@ -195,9 +187,6 @@ export default function Favorites() {
                   {group.channels.map(channel => {
                     const isExternalOnly = !channel.stream_url.startsWith('http');
                     
-                    // ==========================================
-                    // COMPACT GRID VIEW CARD
-                    // ==========================================
                     if (viewMode === 'grid') {
                       return (
                         <div 
@@ -208,7 +197,8 @@ export default function Favorites() {
                           onTouchStart={() => handleTouchStart(channel.stream_url)}
                           onTouchEnd={handleTouchEnd}
                           onClick={(e) => { 
-                            if(!isExternalOnly) playChannel(channel.stream_url, channel.name); 
+                            // UPDATED: Now passing the logo_url to the global store
+                            if(!isExternalOnly) setPlayingChannel(channel.stream_url, channel.name, channel.logo_url); 
                             else launchExternalPlayer(e, channel.stream_url, channel.name); 
                           }}
                           className="bg-[#12141a] border border-slate-800/60 rounded-xl overflow-hidden hover:border-blue-500/50 hover:shadow-[0_0_15px_rgba(59,130,246,0.15)] transition-all cursor-pointer group flex flex-col relative"
@@ -267,9 +257,6 @@ export default function Favorites() {
                       );
                     }
 
-                    // ==========================================
-                    // LIST VIEW ROW
-                    // ==========================================
                     return (
                       <div 
                         key={channel.id}
@@ -279,7 +266,8 @@ export default function Favorites() {
                         onTouchStart={() => handleTouchStart(channel.stream_url)} 
                         onTouchEnd={handleTouchEnd}
                         onClick={(e) => { 
-                          if(!isExternalOnly) playChannel(channel.stream_url, channel.name); 
+                          // UPDATED: Now passing the logo_url to the global store
+                          if(!isExternalOnly) setPlayingChannel(channel.stream_url, channel.name, channel.logo_url); 
                           else launchExternalPlayer(e, channel.stream_url, channel.name); 
                         }}
                         className="flex flex-col sm:flex-row sm:items-center justify-between w-full p-2.5 sm:p-3 bg-[#12141a] border border-slate-800/60 rounded-xl hover:border-slate-600 transition-all cursor-pointer group"
@@ -331,7 +319,11 @@ export default function Favorites() {
                           
                           {!isExternalOnly && (
                             <button 
-                              onClick={(e) => { e.stopPropagation(); playChannel(channel.stream_url, channel.name); }} 
+                              onClick={(e) => { 
+                                e.stopPropagation(); 
+                                // UPDATED: Now passing the logo_url to the global store
+                                setPlayingChannel(channel.stream_url, channel.name, channel.logo_url); 
+                              }} 
                               className="p-2 sm:p-2.5 bg-blue-600/10 text-blue-500 hover:bg-blue-600 hover:text-white rounded-lg transition-colors ml-1"
                             >
                               <Play size={18} className="fill-current" />
@@ -348,7 +340,6 @@ export default function Favorites() {
         </div>
       </div>
 
-      {/* ERROR / SUCCESS TOAST */}
       {toast && (
         <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 text-white px-6 py-3 rounded-full shadow-[0_10px_40px_rgba(0,0,0,0.5)] flex items-center gap-2 font-medium animate-in slide-in-from-bottom-5 fade-in z-[100] border ${toast.type === 'error' ? 'bg-red-900/95 border-red-700' : 'bg-slate-800/95 border-slate-700'}`}>
           {toast.type === 'success' ? <CheckCircle size={18} className="text-green-400 shrink-0" /> : <AlertCircle size={18} className="text-red-400 shrink-0" />}
