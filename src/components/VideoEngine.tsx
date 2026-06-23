@@ -170,7 +170,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     video.addEventListener('error', handleNativeError);
 
     const initializePlayer = () => {
-      // MIXED CONTENT TRAP: Catch HTTPS apps trying to load HTTP streams
+      // MIXED CONTENT TRAP
       if (window.location.protocol === 'https:' && streamUrl.startsWith('http://')) {
         clearWatchdog();
         setErrorUI({
@@ -340,9 +340,13 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
               }
             }
             else {
+              // ABR FAILSAFE: Restart engine if level-switch fails
               if (data.details === 'levelSwitchError' || data.details === 'levelLoadError') {
                 hls.currentLevel = -1;
+                hls.nextLevel = -1;
+                hls.loadLevel = -1;
                 setCurrentLevel(-1);
+                hls.startLoad();
                 return;
               }
               setErrorUI({ title: "Playback Error", desc: "The video format is not supported or the stream data is corrupted.", raw: `System Error: ${data.details}` });
@@ -405,10 +409,13 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     setRetryCount(prev => prev + 1);
   };
 
+  // COMPLETE ABR RESET IMPLEMENTATION
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
       hlsRef.current.currentLevel = levelIndex;
       if (levelIndex === -1) {
+        hlsRef.current.nextLevel = -1;
+        hlsRef.current.loadLevel = -1;
         hlsRef.current.nextLoadLevel = -1;
       }
       setCurrentLevel(levelIndex);
