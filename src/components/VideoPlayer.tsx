@@ -47,6 +47,9 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const [subtitleTracks, setSubtitleTracks] = useState<any[]>([]);
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
+  
+  // PROTECTS MANUAL USER CLICKS FROM BACKGROUND METADATA UPDATES
+  const userTouchedSubtitles = useRef(false);
 
   const formatTime = (seconds: number) => {
     if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "00:00";
@@ -94,6 +97,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     setAudioTracks([]);
     setSubtitleTracks([]);
     activeMenuRef.current = null;
+    userTouchedSubtitles.current = false; // Reset lock on new video
     
     if (containerRef.current) {
       containerRef.current.style.opacity = '1';
@@ -169,7 +173,32 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.attachMedia(video);
 
         let initialAudioSet = false;
-        let initialSubSet = false;
+
+        // BULLETPROOF SUBTITLE PROCESSOR
+        const processSubtitles = (tracks: any[]) => {
+          setSubtitleTracks(tracks);
+          
+          if (userTouchedSubtitles.current) return; // Abort if user clicked a subtitle manually
+          
+          if (tracks.length > 0) {
+            if (defaultSubtitle) {
+              const idx = tracks.findIndex(t => 
+                t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
+                t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
+              );
+              if (idx !== -1) {
+                hls.subtitleTrack = idx;
+                setCurrentSubtitleTrack(idx);
+              } else {
+                hls.subtitleTrack = -1; // Explicitly turn off engine
+                setCurrentSubtitleTrack(-1);
+              }
+            } else {
+              hls.subtitleTrack = -1; // Explicitly turn off engine
+              setCurrentSubtitleTrack(-1);
+            }
+          }
+        };
 
         hls.on(Hls.Events.MANIFEST_PARSED, (_event: string, data: Record<string, any>) => {
           setLevels(data.levels || []);
@@ -204,19 +233,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           }
 
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
-            setSubtitleTracks(hls.subtitleTracks);
-            if (defaultSubtitle) {
-              const idx = hls.subtitleTracks.findIndex(t => 
-                t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
-                t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
-              );
-              if (idx !== -1) {
-                hls.subtitleTrack = idx;
-                setCurrentSubtitleTrack(idx);
-                initialSubSet = true;
-              }
-            }
-            if (!initialSubSet) setCurrentSubtitleTrack(-1);
+            processSubtitles(hls.subtitleTracks);
           }
 
           setIsBuffering(false);
@@ -244,19 +261,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         });
 
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event: string, data: Record<string, any>) => {
-          const tracks = data.subtitleTracks || [];
-          setSubtitleTracks(tracks);
-          if (defaultSubtitle && !initialSubSet && tracks.length > 0) {
-            const idx = tracks.findIndex((t: any) => 
-              t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
-              t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
-            );
-            if (idx !== -1) {
-              hls.subtitleTrack = idx;
-              setCurrentSubtitleTrack(idx);
-              initialSubSet = true;
-            }
-          }
+          processSubtitles(data.subtitleTracks || []);
         });
 
         let internalNetworkRetries = 0;
@@ -369,6 +374,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     if (hlsRef.current) {
       hlsRef.current.subtitleTrack = trackIndex;
       setCurrentSubtitleTrack(trackIndex);
+      
+      // LOCK BACKGROUND OVERRIDES
+      userTouchedSubtitles.current = true;
+      
       setActiveMenu(null);
       activeMenuRef.current = null;
     }
