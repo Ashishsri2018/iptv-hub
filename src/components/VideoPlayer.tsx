@@ -36,6 +36,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
 
   const [levels, setLevels] = useState<any[]>([]);
   const [currentLevel, setCurrentLevel] = useState<number>(-1);
+  const [autoLevel, setAutoLevel] = useState<number>(-1); // Tracks actual playing level when in Auto
 
   const [audioTracks, setAudioTracks] = useState<any[]>([]);
   const [currentAudioTrack, setCurrentAudioTrack] = useState<number>(-1);
@@ -66,6 +67,7 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     setHasFatalError(false);
     setExactErrorMsg("");
     setActiveMenu(null);
+    setAutoLevel(-1);
     activeMenuRef.current = null;
     
     if (containerRef.current) {
@@ -99,7 +101,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       let defaultAudio = '';
       let defaultSubtitle = '';
 
-      // Fetch global settings
       try {
         const res = await fetch(`${API_URL}/api/settings`);
         if (res.ok) {
@@ -120,7 +121,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
         hls.attachMedia(video);
 
         hls.on(Hls.Events.MANIFEST_PARSED, (_: any, data: any) => {
-          // 1. Process Video Quality
           setLevels(data.levels);
           let targetLevel = -1; 
           if (data.levels.length > 1) {
@@ -130,7 +130,6 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           hls.currentLevel = targetLevel;
           setCurrentLevel(targetLevel);
 
-          // 2. Process Audio Tracks
           if (hls.audioTracks && hls.audioTracks.length > 1) {
             setAudioTracks(hls.audioTracks);
             if (defaultAudio) {
@@ -142,18 +141,16 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                 hls.audioTrack = idx;
                 setCurrentAudioTrack(idx);
               } else {
-                setCurrentAudioTrack(hls.audioTrack); // Fallback to stream default
+                setCurrentAudioTrack(hls.audioTrack); 
               }
             } else {
               setCurrentAudioTrack(hls.audioTrack);
             }
           }
 
-          // 3. Process Subtitles
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
             setSubtitleTracks(hls.subtitleTracks);
             if (defaultSubtitle) {
-              // Look for a track that matches the user's preferred language string
               const idx = hls.subtitleTracks.findIndex(t => 
                 t.name?.toLowerCase().includes(defaultSubtitle.toLowerCase()) || 
                 t.lang?.toLowerCase().includes(defaultSubtitle.toLowerCase())
@@ -162,10 +159,10 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                 hls.subtitleTrack = idx;
                 setCurrentSubtitleTrack(idx);
               } else {
-                setCurrentSubtitleTrack(-1); // Default to off if no match found
+                setCurrentSubtitleTrack(-1); 
               }
             } else {
-              setCurrentSubtitleTrack(-1); // Default to off if no setting provided
+              setCurrentSubtitleTrack(-1); 
             }
           }
 
@@ -175,6 +172,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
             setIsPlaying(false);
           });
         });
+
+        // TRACK ACTUAL AUTO QUALITY LEVEL
+        if ((Hls.Events as any).LEVEL_SWITCHED) {
+          hls.on((Hls.Events as any).LEVEL_SWITCHED, (_: any, data: any) => {
+            setAutoLevel(data.level);
+          });
+        }
 
         if ((Hls.Events as any).AUDIO_TRACKS_UPDATED) {
           hls.on((Hls.Events as any).AUDIO_TRACKS_UPDATED, (_: any, data: any) => setAudioTracks(data.audioTracks || []));
@@ -305,15 +309,24 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setVolume(val);
-    if (videoRef.current) videoRef.current.volume = val;
+    if (videoRef.current) {
+      videoRef.current.volume = val;
+      videoRef.current.muted = val === 0;
+    }
     setIsMuted(val === 0);
   };
 
   const toggleMute = () => {
     if (videoRef.current) {
-      videoRef.current.muted = !isMuted;
-      setIsMuted(!isMuted);
-      if (isMuted && volume === 0) setVolume(0.5); 
+      const nextMuted = !videoRef.current.muted;
+      videoRef.current.muted = nextMuted;
+      setIsMuted(nextMuted);
+      
+      // If unmuting and slider was at 0, bump it up so we hear sound
+      if (!nextMuted && volume === 0) {
+        setVolume(0.5);
+        videoRef.current.volume = 0.5;
+      }
     }
   };
 
@@ -515,9 +528,13 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
                   {activeMenu === 'quality' && (
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Quality</span></div>
+                      
+                      {/* DYNAMIC AUTO LABEL FIX */}
                       <button onClick={() => changeQuality(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
-                        Auto {currentLevel === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+                        Auto {currentLevel === -1 && autoLevel !== -1 && levels[autoLevel]?.height ? `(${levels[autoLevel].height}p)` : ''} 
+                        {currentLevel === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
                       </button>
+
                       {levels.map((level, idx) => (
                         <button key={idx} onClick={() => changeQuality(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
                           {level.height ? `${level.height}p` : `Level ${idx + 1}`} {currentLevel === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
