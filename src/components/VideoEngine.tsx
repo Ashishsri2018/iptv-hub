@@ -120,18 +120,20 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
       if (watchdogTimer) clearTimeout(watchdogTimer);
     };
 
-    // 12-SECOND STUCK STREAM WATCHDOG
+        // 15-SECOND STUCK STREAM WATCHDOG
     watchdogTimer = setTimeout(() => {
-      if (isMounted && videoRef.current && videoRef.current.readyState === 0) {
+      if (isMounted && videoRef.current && (videoRef.current.readyState < 3 || videoRef.current.paused)) {
         setErrorUI({
-          title: "Stream Timeout",
-          desc: "The stream took too long to load or the format is unreadable. Try opening it in an external player.",
-          raw: "ERR_CONNECTION_TIMEOUT"
+          title: "Stream Timeout / Black Screen",
+          desc: "The stream is stuck or uses an unsupported codec. Try opening it in an external player.",
+          raw: "ERR_STUCK_OR_BAD_CODEC"
         });
         setHasFatalError(true);
         setIsBuffering(false);
+        if (hlsRef.current) hlsRef.current.destroy();
       }
-    }, 12000);
+    }, 15000);
+
 
     const handleNativePlay = () => setIsPlaying(true);
     const handleNativePause = () => setIsPlaying(false);
@@ -180,9 +182,23 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
     video.addEventListener('loadedmetadata', handleNativeMeta);
     video.addEventListener('error', handleNativeError);
 
-    const initializePlayer = async () => {
+        const initializePlayer = () => {
+      // MIXED CONTENT TRAP: Catch HTTPS apps trying to load HTTP streams
+      if (window.location.protocol === 'https:' && streamUrl.startsWith('http://')) {
+        clearWatchdog();
+        setErrorUI({
+          title: "Mixed Content Blocked",
+          desc: "Your browser's security settings blocked this HTTP stream on a secure HTTPS website. Play it externally.",
+          raw: "ERR_MIXED_CONTENT_HTTP"
+        });
+        setHasFatalError(true);
+        setIsBuffering(false);
+        return;
+      }
+
       if (!streamUrl.startsWith('http')) {
         clearWatchdog();
+
         setErrorUI({
           title: "External Protocol",
           desc: "This stream uses a special protocol and must be opened in an external player.",
@@ -306,7 +322,9 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
           processSubtitles(data.subtitleTracks || []);
         });
 
-        let internalNetworkRetries = 0;
+                let internalNetworkRetries = 0;
+        let mediaRecoveryAttempts = 0;
+
         hls.on(Hls.Events.ERROR, (_event, data) => {
           // Explicit trap for Manifest Parse Errors
           if (data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR) {
@@ -339,9 +357,22 @@ export default function VideoPlayer({ streamUrl }: VideoPlayerProps) {
               setHasFatalError(true);
               hls.destroy();
             }
-            else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              hls.recoverMediaError();
+                        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              if (mediaRecoveryAttempts < 2) {
+                mediaRecoveryAttempts++;
+                hls.recoverMediaError();
+              } else {
+                clearWatchdog();
+                setErrorUI({ 
+                  title: "Codec Unsupported", 
+                  desc: "This stream uses an incompatible video/audio codec for this browser. Try opening it in an external player.", 
+                  raw: `Media Error: ${data.details}` 
+                });
+                setHasFatalError(true);
+                hls.destroy();
+              }
             }
+
             else {
               if (data.details === 'levelSwitchError' || data.details === 'levelLoadError') {
                 hls.currentLevel = -1;
