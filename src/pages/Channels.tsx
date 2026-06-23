@@ -150,7 +150,8 @@ export default function Channels() {
     setSearchQuery('');
     setSubmittedSearch('');
     
-    if (activeSourceId && activeSourceId !== 'All') {
+    // THE FIX: Allow "All" to fetch global categories from the backend
+    if (activeSourceId) {
       fetch(`${API_URL}/api/categories?sourceId=${activeSourceId}`)
         .then(res => {
           if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
@@ -180,7 +181,6 @@ export default function Channels() {
   const loadMoreChannels = useCallback(async (reset = false) => {
     const engine = engineRefs.current;
     
-    // THE FIX: Block fetch until the default alphabetical playlist has been calculated
     if (engine.sourceId === null) return; 
     
     if (engine.isFetching) return;
