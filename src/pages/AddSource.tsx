@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Link, Upload, Server, Tv2, Loader2, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Link, Upload, Server, Tv2, Loader2, CheckCircle, AlertTriangle, Eye, EyeOff } from 'lucide-react';
 import { API_URL } from '../config';
 
 type Tab = 'm3u-url' | 'm3u-file' | 'xtream' | 'stalker';
@@ -18,9 +18,11 @@ export default function AddSource() {
   const [xtreamUrl, setXtreamUrl] = useState('');
   const [xtreamUser, setXtreamUser] = useState('');
   const [xtreamPass, setXtreamPass] = useState('');
+  const [showXtreamPass, setShowXtreamPass] = useState(false);
   
   const [stalkerUrl, setStalkerUrl] = useState('');
   const [stalkerMac, setStalkerMac] = useState('');
+  const [showStalkerMac, setShowStalkerMac] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -247,7 +249,23 @@ export default function AddSource() {
               </div>
               <div className="flex-1">
                 <label className="block text-sm font-medium text-slate-400 mb-1">Password</label>
-                <input type="password" value={xtreamPass} onChange={(e) => setXtreamPass(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100" disabled={status.state === 'loading'} />
+                <div className="relative">
+                  <input 
+                    type={showXtreamPass ? "text" : "password"} 
+                    value={xtreamPass} 
+                    onChange={(e) => setXtreamPass(e.target.value)} 
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-4 pr-10 py-3 text-slate-100 focus:outline-none focus:border-blue-500" 
+                    disabled={status.state === 'loading'} 
+                  />
+                  <button 
+                    type="button" 
+                    onClick={() => setShowXtreamPass(!showXtreamPass)} 
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                    disabled={status.state === 'loading'}
+                  >
+                    {showXtreamPass ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
               </div>
             </div>
             <button onClick={processXtream} disabled={status.state === 'loading' || !xtreamUrl || !xtreamUser || !xtreamPass || !nameInput} className="bg-blue-600 disabled:bg-blue-600/50 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors mt-2 flex justify-center items-center gap-2">
@@ -265,7 +283,25 @@ export default function AddSource() {
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-400 mb-1">MAC Address</label>
-              <input type="text" value={stalkerMac} onChange={(e) => setStalkerMac(e.target.value)} placeholder="00:1A:79:XX:YY:ZZ" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 uppercase tracking-widest font-mono" disabled={status.state === 'loading'} maxLength={17} />
+              <div className="relative">
+                <input 
+                  type={showStalkerMac ? "text" : "password"} 
+                  value={stalkerMac} 
+                  onChange={(e) => setStalkerMac(e.target.value)} 
+                  placeholder="00:1A:79:XX:YY:ZZ" 
+                  className={`w-full bg-slate-950 border border-slate-700 rounded-lg pl-4 pr-10 py-3 text-slate-100 focus:outline-none focus:border-blue-500 ${showStalkerMac ? 'uppercase tracking-widest font-mono' : ''}`} 
+                  disabled={status.state === 'loading'} 
+                  maxLength={17} 
+                />
+                <button 
+                  type="button" 
+                  onClick={() => setShowStalkerMac(!showStalkerMac)} 
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                  disabled={status.state === 'loading'}
+                >
+                  {showStalkerMac ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
             </div>
             <button onClick={processStalker} disabled={status.state === 'loading' || !stalkerUrl || !stalkerMac || !nameInput} className="bg-blue-600 disabled:bg-blue-600/50 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors mt-2 flex justify-center items-center gap-2">
               {status.state === 'loading' ? <Loader2 className="animate-spin" size={20} /> : 'Authorize MAC & Fetch Data'}
