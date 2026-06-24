@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
-import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles, WifiOff, RefreshCw } from 'lucide-react';
+import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AlertTriangle, ExternalLink, AudioLines, Subtitles, WifiOff, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useAppStore } from '../store';
 
 interface VideoEngineProps {
   streamUrl: string;
 }
+
+const PROXY_WORKER_URL = "https://iptv-proxy.ashishsri2018.workers.dev/";
 
 export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const { channelName, settings } = useAppStore();
@@ -15,6 +17,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
+  const [useProxy, setUseProxy] = useState(false);
   
   const [volume, setVolume] = useState(() => {
     const saved = localStorage.getItem('iptv_volume');
@@ -62,8 +65,10 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
   useEffect(() => {
     setRetryCount(0);
+    setUseProxy(false);
   }, [streamUrl]);
 
+  // Actual offline detection (Triggers ONLY when network interface goes down)
   useEffect(() => {
     const handleOffline = () => {
       setErrorUI({
@@ -113,9 +118,9 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     watchdogTimer = setTimeout(() => {
       if (isMounted && videoRef.current && (videoRef.current.readyState < 3 || videoRef.current.paused)) {
         setErrorUI({
-          title: "Stream Timeout / Black Screen",
-          desc: "The stream is stuck or uses an unsupported codec. Try opening it in an external player.",
-          raw: "ERR_STUCK_OR_BAD_CODEC"
+          title: "Stream Timeout",
+          desc: "The stream is stuck loading or is dead.",
+          raw: "ERR_STUCK_OR_TIMEOUT"
         });
         setHasFatalError(true);
         setIsBuffering(false);
@@ -133,13 +138,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     const handleLeavePip = () => {
-      setTimeout(() => {
-        if (videoRef.current && videoRef.current.paused) {
-          window.dispatchEvent(new CustomEvent('force-close-player'));
-        } else {
-          window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
-        }
-      }, 100);
+      // Fixes Chrome bug: DO NOT force close the player. Just update the UI state.
+      window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
     };
 
     const handleNativeMeta = () => {
@@ -148,15 +148,27 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       video.play().catch(() => setIsPlaying(false));
     };
     
+    // Detailed Native Error Extraction
     const handleNativeError = () => {
       clearWatchdog();
       setIsBuffering(false);
-      const errCode = video.error?.code || 'Unknown';
-      if (!navigator.onLine) {
-        setErrorUI({ title: "No Internet Connection", desc: "You are offline.", raw: "ERR_INTERNET_DISCONNECTED" });
-      } else {
-        setErrorUI({ title: "Incompatible Stream", desc: "This stream format cannot be read natively by your browser. Try opening it in an external player.", raw: `Native Browser Error (Code: ${errCode})` });
+      const err = video.error;
+      let rawCode = "Unknown";
+      
+      if (err) {
+        switch(err.code) {
+          case 1: rawCode = "MEDIA_ERR_ABORTED"; break;
+          case 2: rawCode = "MEDIA_ERR_NETWORK"; break;
+          case 3: rawCode = "MEDIA_ERR_DECODE"; break;
+          case 4: rawCode = "MEDIA_ERR_SRC_NOT_SUPPORTED"; break;
+        }
       }
+      
+      setErrorUI({ 
+        title: "Native Playback Failed", 
+        desc: "The browser's native video engine rejected this stream format. Use the proxy or external player.", 
+        raw: `Code: ${rawCode}` 
+      });
       setHasFatalError(true);
     };
 
@@ -170,12 +182,20 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     video.addEventListener('error', handleNativeError);
 
     const initializePlayer = () => {
-      // MIXED CONTENT TRAP
-      if (window.location.protocol === 'https:' && streamUrl.startsWith('http://')) {
+      let activeStreamUrl = streamUrl;
+      
+      if (useProxy) {
+        const config = { url: streamUrl, userAgent: "IPTVSmarters/1.0" };
+        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
+        activeStreamUrl = `${PROXY_WORKER_URL}?cfg=${encoded}`;
+      }
+
+      // MIXED CONTENT HTTP TRAP
+      if (window.location.protocol === 'https:' && activeStreamUrl.startsWith('http://')) {
         clearWatchdog();
         setErrorUI({
           title: "Mixed Content Blocked",
-          desc: "Your browser's security settings blocked this HTTP stream on a secure HTTPS website. Play it externally.",
+          desc: "Your browser blocked this HTTP stream for security. Retry with Proxy to tunnel it securely via HTTPS.",
           raw: "ERR_MIXED_CONTENT_HTTP"
         });
         setHasFatalError(true);
@@ -183,12 +203,12 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         return;
       }
 
-      if (!streamUrl.startsWith('http')) {
+      if (!activeStreamUrl.startsWith('http')) {
         clearWatchdog();
         setErrorUI({
           title: "External Protocol",
           desc: "This stream uses a special protocol and must be opened in an external player.",
-          raw: `Unsupported protocol: ${streamUrl.split(':')[0]}`
+          raw: `Unsupported protocol: ${activeStreamUrl.split(':')[0]}`
         });
         setHasFatalError(true);
         setIsBuffering(false);
@@ -203,7 +223,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         const hls = new Hls({ maxMaxBufferLength: 30 });
         hlsRef.current = hls;
 
-        hls.loadSource(streamUrl);
+        hls.loadSource(activeStreamUrl);
         hls.attachMedia(video);
 
         let initialAudioSet = false;
@@ -291,9 +311,9 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
           processSubtitles(data.subtitleTracks || []);
         });
 
-        let internalNetworkRetries = 0;
-        let mediaRecoveryAttempts = 0;
-
+        // ==========================================
+        // DETAILED HLS ERROR CAPTURE
+        // ==========================================
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR) {
             clearWatchdog();
@@ -307,49 +327,39 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
           if (data.fatal) {
             clearWatchdog();
             setIsBuffering(false);
-            
-            if (!navigator.onLine) {
-              setErrorUI({ title: "No Internet Connection", desc: "You appear to be offline.", raw: "ERR_INTERNET_DISCONNECTED" });
-              setHasFatalError(true);
-              hls.destroy();
-              return;
-            }
 
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              if (internalNetworkRetries < 3) {
-                internalNetworkRetries++;
-                hls.startLoad();
-                return;
+              // Extract the exact HTTP Status Code
+              const httpStatus = data.response?.code || 0;
+              let title = "Network Error";
+              let desc = "Failed to download stream data.";
+              
+              if (httpStatus === 403 || httpStatus === 401) {
+                title = "Geo-Blocked / 403 Forbidden";
+                desc = "The provider is actively blocking your connection. Use the proxy to bypass this.";
+              } else if (httpStatus === 0) {
+                title = "CORS Block / Dead Link";
+                desc = "The browser blocked this stream (CORS), or the server is completely unreachable.";
+              } else if (httpStatus >= 500) {
+                title = "Provider Offline";
+                desc = "The IPTV server is experiencing downtime.";
               }
-              setErrorUI({ title: "Connection Refused", desc: "The stream server rejected the request. This is usually caused by strict browser security (CORS) or a dead link.", raw: `Network Error: ${data.details}` });
+
+              setErrorUI({ title, desc, raw: `HTTP ${httpStatus} - ${data.details}` });
               setHasFatalError(true);
               hls.destroy();
             }
             else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              if (mediaRecoveryAttempts < 2) {
-                mediaRecoveryAttempts++;
-                hls.recoverMediaError();
-              } else {
-                setErrorUI({ 
-                  title: "Codec Unsupported", 
-                  desc: "This stream uses an incompatible video/audio codec for this browser. Try opening it in an external player.", 
-                  raw: `Media Error: ${data.details}` 
-                });
-                setHasFatalError(true);
-                hls.destroy();
-              }
+              setErrorUI({ 
+                title: "Codec Unsupported", 
+                desc: "This stream uses an incompatible video/audio codec for this browser.", 
+                raw: `Media Error: ${data.details}` 
+              });
+              setHasFatalError(true);
+              hls.destroy();
             }
             else {
-              // ABR FAILSAFE: Restart engine if level-switch fails
-              if (data.details === 'levelSwitchError' || data.details === 'levelLoadError') {
-                hls.currentLevel = -1;
-                hls.nextLevel = -1;
-                hls.loadLevel = -1;
-                setCurrentLevel(-1);
-                hls.startLoad();
-                return;
-              }
-              setErrorUI({ title: "Playback Error", desc: "The video format is not supported or the stream data is corrupted.", raw: `System Error: ${data.details}` });
+              setErrorUI({ title: "Playback Error", desc: "The stream data is corrupted or unreadable.", raw: `System Error: ${data.details}` });
               setHasFatalError(true);
               hls.destroy();
             }
@@ -357,7 +367,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         });
       } 
       else {
-        video.src = streamUrl;
+        video.src = activeStreamUrl;
         video.load(); 
       }
     };
@@ -391,7 +401,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       video.removeAttribute('src'); 
       video.load();
     };
-  }, [streamUrl, retryCount, settings]);
+  }, [streamUrl, retryCount, settings, useProxy]);
 
   // ==========================================
   // CONTROLS & MENUS
@@ -402,14 +412,14 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     activeMenuRef.current = nextMenu;
   };
 
-  const handleRetry = () => {
+  const handleRetryProxy = () => {
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
     setIsBuffering(true);
+    setUseProxy(true);
     setRetryCount(prev => prev + 1);
   };
 
-  // COMPLETE ABR RESET IMPLEMENTATION
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
       hlsRef.current.currentLevel = levelIndex;
@@ -551,25 +561,34 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     }
   };
 
+  // Fixed PiP Logic for Chrome/Firefox
   const togglePiP = async () => {
     try {
       if (document.pictureInPictureElement) {
         await document.exitPictureInPicture();
-      } else if (videoRef.current) {
+      } else if (document.pictureInPictureEnabled && videoRef.current) {
         await videoRef.current.requestPictureInPicture();
+      } else {
+        alert("Picture-in-Picture is not natively supported or is disabled in your current browser.");
       }
     } catch (error) {
       console.warn("PiP Error:", error);
     }
   };
 
-  const launchExternalPlayer = () => {
+  const launchExternalPlayer = (forceProxy: boolean = false) => {
     try {
       const isAndroid = /Android/i.test(navigator.userAgent);
       let targetUrl = streamUrl;
 
+      if (forceProxy) {
+        const config = { url: streamUrl, userAgent: "IPTVSmarters/1.0" };
+        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
+        targetUrl = `${PROXY_WORKER_URL}?cfg=${encoded}`;
+      }
+
       if (isAndroid) {
-        const match = streamUrl.match(/^([a-zA-Z0-9]+):\/\/(.*)$/);
+        const match = targetUrl.match(/^([a-zA-Z0-9]+):\/\/(.*)$/);
         if (match) {
           const scheme = match[1];
           const path = match[2];
@@ -577,7 +596,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
           targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(safeName)};end;`;
         }
       } else {
-        targetUrl = `vlc://${streamUrl}`;
+        targetUrl = `vlc://${targetUrl}`;
       }
       
       window.location.href = targetUrl;
@@ -620,24 +639,31 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         />
       )}
 
+      {/* NEW 3-BUTTON ERROR UI */}
       {hasFatalError && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10]/95 backdrop-blur-sm text-center p-6 animate-in fade-in duration-300">
-          {errorUI.title === "No Internet Connection" || errorUI.title === "Connection Lost" ? (
+          {errorUI.title === "Connection Lost" ? (
             <WifiOff size={64} className="text-red-500 mb-5 drop-shadow-[0_0_15px_rgba(239,68,68,0.3)]" />
+          ) : errorUI.title.includes("Geo-Blocked") ? (
+            <ShieldAlert size={64} className="text-indigo-500 mb-5 drop-shadow-[0_0_15px_rgba(99,102,241,0.3)]" />
           ) : (
             <AlertTriangle size={64} className="text-yellow-500 mb-5 drop-shadow-[0_0_15px_rgba(234,179,8,0.3)]" />
           )}
-          <h3 className="text-2xl font-bold text-white mb-2">{errorUI.title}</h3>
-          <p className="text-slate-300 mb-6 max-w-md text-sm">{errorUI.desc}</p>
-          <div className="bg-black/50 border border-slate-800/50 rounded-lg p-3.5 mb-8 w-full max-w-lg">
+          <h3 className="text-xl sm:text-2xl font-bold text-white mb-2">{errorUI.title}</h3>
+          <p className="text-slate-300 mb-4 max-w-md text-xs sm:text-sm">{errorUI.desc}</p>
+          <div className="bg-black/50 border border-slate-800/50 rounded-lg p-3 mb-6 w-full max-w-lg">
             <p className="text-red-400 font-mono text-xs break-all text-left">{errorUI.raw}</p>
           </div>
-          <div className="flex flex-col sm:flex-row items-center gap-4 w-full sm:w-auto">
-            <button onClick={handleRetry} className="px-6 py-3.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-lg flex items-center justify-center gap-3 border border-slate-700 w-full sm:w-auto">
-              <RefreshCw size={20} /> Retry
+          
+          <div className="flex flex-col gap-3 w-full max-w-sm">
+            <button onClick={handleRetryProxy} className="px-5 py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-indigo-900/20 transition-all">
+              <RefreshCw size={18} /> Retry with Proxy
             </button>
-            <button onClick={launchExternalPlayer} className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg flex items-center justify-center gap-3 w-full sm:w-auto">
-              <ExternalLink size={20} /> Open External
+            <button onClick={() => launchExternalPlayer(true)} className="px-5 py-3 bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 transition-all">
+              <ExternalLink size={18} /> Play External (with Proxy)
+            </button>
+            <button onClick={() => launchExternalPlayer(false)} className="px-5 py-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 transition-all">
+              <ExternalLink size={18} /> Play External (without Proxy)
             </button>
           </div>
         </div>
