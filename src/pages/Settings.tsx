@@ -296,7 +296,7 @@ export default function Settings() {
         {/* ========================================= */}
         {/* PLAYBACK & DATA SETTINGS                  */}
         {/* ========================================= */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-2">
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm flex flex-col">
             <div className="flex items-center gap-2 mb-4 border-b border-slate-800 pb-3">
               <MonitorPlay className="text-slate-400" size={20} />
@@ -345,14 +345,35 @@ export default function Settings() {
                   <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" size={16} />
                 </div>
               </div>
-              <div className="pt-4 flex items-end h-full">
-                <button onClick={handleSaveBasic} disabled={saving || !hasBasicChanges} className={`w-full py-2.5 text-white rounded-lg font-medium transition-all flex items-center justify-center gap-2 ${saving || !hasBasicChanges ? 'bg-slate-700 text-slate-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 active:scale-95'}`}>
-                  {saving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
-                  {saving ? 'Saving...' : 'Save Playback Settings'}
-                </button>
-              </div>
             </div>
           </div>
+        </div>
+
+        {/* Basic Settings Action Bar (Restored for TypeScript status variable) */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-8">
+          <div className="flex-1">
+            {status.type && (
+              <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border animate-in fade-in ${
+                status.type === 'success' ? 'bg-green-900/20 text-green-400 border-green-900/50' : 'bg-red-900/20 text-red-400 border-red-900/50'
+              }`}>
+                {status.type === 'success' ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
+                {status.message}
+              </div>
+            )}
+            {!status.type && hasBasicChanges && !saving && (
+              <div className="inline-flex items-center gap-2 text-yellow-500 text-sm font-medium animate-in fade-in pl-2">
+                <AlertCircle size={16} /> You have unsaved playback changes
+              </div>
+            )}
+          </div>
+          <button 
+            onClick={handleSaveBasic} 
+            disabled={saving || !hasBasicChanges} 
+            className={`w-full sm:w-auto px-8 py-2.5 text-white rounded-lg font-medium transition-all flex items-center justify-center gap-2 shadow-lg ${saving || !hasBasicChanges ? 'bg-slate-700 text-slate-400 cursor-not-allowed shadow-none' : 'bg-blue-600 hover:bg-blue-700 active:scale-95 shadow-blue-900/20'}`}
+          >
+            {saving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+            {saving ? 'Saving...' : 'Save Playback Settings'}
+          </button>
         </div>
 
         {/* ========================================= */}
