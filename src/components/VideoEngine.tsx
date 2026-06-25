@@ -17,6 +17,9 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
 
+  // THE USER'S "MEMORY" FIX: Tracks if the user actually wants the video playing
+  const intendedPlayState = useRef(true);
+
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
   const [useProxy, setUseProxy] = useState(false);
@@ -29,7 +32,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   });
   const [isMuted, setIsMuted] = useState(() => localStorage.getItem('iptv_muted') === 'true');
   
-  // Refactored Error States
   const [hasFatalError, setHasFatalError] = useState(false);
   const [errorUI, setErrorUI] = useState<ErrorState>({ title: '', desc: '', raw: '' });
   const [retryCount, setRetryCount] = useState(0);
@@ -68,6 +70,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   useEffect(() => {
     setRetryCount(0);
     setUseProxy(false);
+    intendedPlayState.current = true; // Reset memory on new channel
   }, [streamUrl]);
 
   useEffect(() => {
@@ -127,15 +130,29 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       setIsBuffering(false);
     };
     
+    // MEMORY FIX IMPLEMENTATION: Checks the RAM intendedPlayState
+    const handleVisibilityChange = () => {
+      if (!document.hidden && videoRef.current && intendedPlayState.current) {
+         videoRef.current.play().catch(() => {});
+      }
+    };
+
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
-    const handleLeavePip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
+    const handleLeavePip = () => {
+      window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
+      setTimeout(() => {
+        if (videoRef.current && videoRef.current.paused && intendedPlayState.current) {
+           window.dispatchEvent(new CustomEvent('force-close-player'));
+        }
+      }, 300);
+    };
+
     const handleNativeMeta = () => {
       clearWatchdog();
       setIsBuffering(false);
-      video.play().catch(() => setIsPlaying(false));
+      if (intendedPlayState.current) video.play().catch(() => setIsPlaying(false));
     };
     
-    // NATIVE ERROR CAPTURE -> Passed to external util
     const handleNativeError = () => {
       clearWatchdog();
       setIsBuffering(false);
@@ -149,6 +166,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     video.addEventListener('playing', handleNativePlaying);
     video.addEventListener('enterpictureinpicture', handleEnterPip);
     video.addEventListener('leavepictureinpicture', handleLeavePip);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     video.addEventListener('loadedmetadata', handleNativeMeta);
     video.addEventListener('error', handleNativeError);
 
@@ -233,7 +251,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
           }
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) processSubtitles(hls.subtitleTracks);
           setIsBuffering(false);
-          video.play().catch(() => setIsPlaying(false));
+          if (intendedPlayState.current) video.play().catch(() => setIsPlaying(false));
         });
 
         hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => setAutoLevel(data.level));
@@ -251,7 +269,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         });
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event, data) => processSubtitles(data.subtitleTracks || []));
 
-        // HLS ERROR CAPTURE -> Passed to external util
         hls.on(Hls.Events.ERROR, (_event, data) => {
           const parsedError = getHlsError(data);
           if (parsedError) {
@@ -288,6 +305,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       video.removeEventListener('playing', handleNativePlaying);
       video.removeEventListener('enterpictureinpicture', handleEnterPip);
       video.removeEventListener('leavepictureinpicture', handleLeavePip);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       video.removeEventListener('loadedmetadata', handleNativeMeta);
       video.removeEventListener('error', handleNativeError);
       if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
@@ -296,7 +314,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     };
   }, [streamUrl, retryCount, settings, useProxy]);
 
-  // CONTROLS & MENUS
   const toggleMenu = (menu: 'quality' | 'audio' | 'subtitles') => {
     const nextMenu = activeMenu === menu ? null : menu;
     setActiveMenu(nextMenu);
@@ -363,10 +380,16 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     } else startControlHideTimer();
   };
 
+  // MEMORY FIX: Manual pauses update the memory
   const togglePlay = () => {
     if (hasFatalError || !videoRef.current) return;
-    if (videoRef.current.paused) videoRef.current.play().catch(() => {});
-    else videoRef.current.pause();
+    if (videoRef.current.paused) {
+      intendedPlayState.current = true;
+      videoRef.current.play().catch(() => {});
+    } else {
+      intendedPlayState.current = false;
+      videoRef.current.pause();
+    }
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -457,7 +480,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         if (match) {
           const scheme = match[1];
           const path = match[2];
-          targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(channelName || 'Live Channel')};end;`;
+          const safeName = channelName || 'Live Channel';
+          targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(safeName)};end;`;
         }
       } else targetUrl = `vlc://${targetUrl}`;
       window.location.href = targetUrl;
@@ -494,7 +518,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         />
       )}
 
-      {/* NEW MODULAR ERROR UI RENDERING */}
       {hasFatalError && (
         <PlayerErrorUI 
           errorUI={errorUI}
