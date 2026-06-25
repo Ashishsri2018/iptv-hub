@@ -288,7 +288,13 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         });
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event, data) => processSubtitles(data.subtitleTracks || []));
 
+        // FIX: Only trigger Error UI if the error is actually Fatal!
         hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (!data.fatal) {
+            // Ignore non-fatal warnings completely (like levelSwitchError during Auto switch)
+            return;
+          }
+
           const parsedError = getHlsError(data);
           if (parsedError) {
             clearWatchdog();
@@ -346,14 +352,10 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     setRetryCount(prev => prev + 1);
   };
 
+  // FIX: Simplified changeQuality. Hls.js automatically handles -1 without forcing resets.
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
-      hlsRef.current.currentLevel = levelIndex;
-      if (levelIndex === -1) {
-        hlsRef.current.nextLevel = -1;
-        hlsRef.current.loadLevel = -1;
-        hlsRef.current.nextLoadLevel = -1;
-      }
+      hlsRef.current.currentLevel = levelIndex; 
       setCurrentLevel(levelIndex);
       setActiveMenu(null);
       activeMenuRef.current = null;
