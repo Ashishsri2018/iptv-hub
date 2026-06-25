@@ -215,22 +215,36 @@ export default function AddSource() {
         // 2. FALLBACK ROUTE: Fetch using Home IP
         const response = await fetch(urlInput);
         
-        // STRICT CONNECTION CHECK (Status 200)
+        // STRICT PING CONNECTION CHECK (Status 200)
         if (!response.ok) {
            throw new Error(`Device connection rejected with status: ${response.status}`);
         }
         
-        const clientText = await response.text();
-        if (!clientText.includes('#EXTM3U')) {
-           throw new Error("Invalid M3U file format received.");
+        // RAM PROTECTION: Check Content-Type to avoid downloading 5GB movies
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const isMpegUrl = contentType.includes('mpegurl') || contentType.includes('m3u') || urlInput.includes('.m3u');
+        
+        let channels = [];
+
+        // If it's an M3U or text, download and parse it
+        if (isMpegUrl || contentType.includes('text') || contentType === '') {
+           const clientText = await response.text();
+           
+           if (clientText.includes('#EXTM3U')) {
+               setStatus({ type: null, message: 'Connected successfully! Parsing locally...' });
+               channels = parseM3ULocally(clientText, tempSourceId);
+           } else {
+               // 200 OK but NO M3U Header = Add as Single Channel
+               channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
+           }
+        } else {
+           // 200 OK and explicitly video/audio = Add as Single Channel WITHOUT downloading text into RAM
+           channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
         }
 
-        setStatus({ type: null, message: 'Connected successfully! Parsing locally...' });
-        
-        const channels = parseM3ULocally(clientText, tempSourceId);
-        if (channels.length === 0) throw new Error("No valid channels found (VODs were skipped).");
+        if (channels.length === 0) throw new Error("No live channels found (VODs were skipped).");
 
-        setStatus({ type: null, message: `Parsed ${channels.length} channels. Uploading to Database...` });
+        setStatus({ type: null, message: `Processing ${channels.length} channel(s). Uploading to Database...` });
 
         // Bulk insert to Cloudflare in manageable chunks
         const CHUNK_SIZE = 5000;
@@ -244,7 +258,7 @@ export default function AddSource() {
            if (!bulkRes.ok) throw new Error(`Database rejected upload chunk: ${bulkRes.status}`);
         }
         
-        setStatus({ type: 'success', message: `Successfully added ${channels.length} channels using Home IP!` });
+        setStatus({ type: 'success', message: `Successfully added ${channels.length} channel(s) using Home IP!` });
         resetForm();
 
       } catch (homeError: any) {
