@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { FolderGit2, Trash2, Tv, Link as LinkIcon, Loader2, AlertCircle, Edit3, RefreshCw, CheckCircle, X } from 'lucide-react';
+import { FolderGit2, Trash2, Tv, Link as LinkIcon, Loader2, AlertCircle, Edit3, RefreshCw, CheckCircle, X, Info } from 'lucide-react';
 import { API_URL } from '../config';
 
+// Updated interface to include the new metadata columns
 interface Source {
   id: string;
   name: string;
@@ -9,9 +10,16 @@ interface Source {
   url: string;
   channel_count: number;
   last_updated: string;
+  playlist_metadata?: string;
+  account_info?: string;
 }
 
-type ModalState = { type: 'rename' | 'xtream' | 'stalker' | null, sourceId: string | null, sourceName: string };
+type ModalState = { 
+  type: 'rename' | 'xtream' | 'stalker' | 'info' | null, 
+  sourceId: string | null, 
+  sourceName: string,
+  sourceObj?: Source | null // Passed for the Info view
+};
 
 export default function Sources() {
   const [sources, setSources] = useState<Source[]>([]);
@@ -187,6 +195,13 @@ export default function Sources() {
     }
   };
 
+  // UI HELPER: Safely formats JSON blobs into readable strings
+  const formatJson = (str?: string) => {
+    if (!str || str === '{}' || str.trim() === '') return null;
+    try { return JSON.stringify(JSON.parse(str), null, 2); } 
+    catch { return str; }
+  };
+
   if (loading) return <div className="flex items-center justify-center h-full"><Loader2 className="animate-spin text-blue-500" size={40} /></div>;
 
   if (errorMsg) {
@@ -266,6 +281,16 @@ export default function Sources() {
 
                 {/* Action Buttons */}
                 <div className="flex items-center gap-2 sm:self-stretch pt-3 sm:pt-0 border-t border-slate-800 sm:border-t-0 sm:border-l sm:pl-4 shrink-0 justify-end">
+                  
+                  {/* NEW INFO BUTTON */}
+                  <button 
+                    onClick={() => setModal({ type: 'info', sourceId: source.id, sourceName: source.name, sourceObj: source })}
+                    className="p-2.5 bg-indigo-950/30 text-indigo-400 hover:bg-indigo-900 hover:text-indigo-100 border border-indigo-900/50 hover:border-indigo-700 rounded-lg transition-colors"
+                    title="Playlist Details & Metadata"
+                  >
+                    <Info size={18} />
+                  </button>
+
                   {!isLocalFile && (
                     <button 
                       onClick={() => handleRefreshClick(source)}
@@ -304,17 +329,23 @@ export default function Sources() {
       {/* DYNAMIC MODALS OVERLAY */}
       {modal.type && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-md shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+          <div className={`bg-slate-900 border border-slate-700 rounded-xl w-full ${modal.type === 'info' ? 'max-w-lg' : 'max-w-md'} shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200`}>
             
+            {/* Modal Header */}
             <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/50">
               <h3 className="font-bold text-slate-100 flex items-center gap-2">
-                {modal.type === 'rename' ? <Edit3 size={18} className="text-blue-400"/> : <RefreshCw size={18} className="text-blue-400"/>}
-                {modal.type === 'rename' ? 'Rename Playlist' : 'Refresh Credentials'}
+                {modal.type === 'rename' ? <Edit3 size={18} className="text-blue-400"/> : 
+                 modal.type === 'info' ? <Info size={18} className="text-indigo-400" /> :
+                 <RefreshCw size={18} className="text-blue-400"/>}
+                
+                {modal.type === 'rename' ? 'Rename Playlist' : 
+                 modal.type === 'info' ? 'Playlist Details' :
+                 'Refresh Credentials'}
               </h3>
               <button 
                 onClick={() => !modalSubmitting && setModal({ type: null, sourceId: null, sourceName: '' })} 
                 disabled={modalSubmitting}
-                className="text-slate-400 hover:text-white disabled:opacity-50"
+                className="text-slate-400 hover:text-white disabled:opacity-50 transition-colors"
               >
                 <X size={20} />
               </button>
@@ -325,6 +356,51 @@ export default function Sources() {
                 Target: <span className="font-bold text-slate-200">{modal.sourceName}</span>
               </p>
 
+              {/* === INFO UI === */}
+              {modal.type === 'info' && modal.sourceObj && (
+                <div className="space-y-5">
+                  <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-sm text-slate-300 bg-slate-950 p-4 rounded-lg border border-slate-800">
+                    <div><span className="text-slate-500 font-semibold block text-[10px] uppercase tracking-wider">Type</span> {modal.sourceObj.type}</div>
+                    <div><span className="text-slate-500 font-semibold block text-[10px] uppercase tracking-wider">Channels</span> {modal.sourceObj.channel_count.toLocaleString()}</div>
+                    <div className="col-span-2"><span className="text-slate-500 font-semibold block text-[10px] uppercase tracking-wider">Updated</span> {new Date(modal.sourceObj.last_updated).toLocaleString()}</div>
+                    <div className="col-span-2 truncate" title={maskUrlCredentials(modal.sourceObj.url)}>
+                      <span className="text-slate-500 font-semibold block text-[10px] uppercase tracking-wider">URL</span> 
+                      {maskUrlCredentials(modal.sourceObj.url)}
+                    </div>
+                  </div>
+
+                  {(() => {
+                    const accInfo = formatJson(modal.sourceObj.account_info);
+                    const metaInfo = formatJson(modal.sourceObj.playlist_metadata);
+                    
+                    return (
+                      <>
+                        {accInfo && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center gap-1.5"><Tv size={14}/> Server Account Info</label>
+                            <div className="bg-[#050505] border border-slate-800 rounded-lg p-3 font-mono text-[11px] text-slate-400 overflow-y-auto max-h-[180px] custom-scrollbar select-all">
+                              <pre>{accInfo}</pre>
+                            </div>
+                          </div>
+                        )}
+                        {metaInfo && (
+                          <div>
+                            <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center gap-1.5"><Edit3 size={14}/> Metadata Overrides</label>
+                            <div className="bg-[#050505] border border-slate-800 rounded-lg p-3 font-mono text-[11px] text-slate-400 overflow-y-auto max-h-[180px] custom-scrollbar select-all">
+                              <pre>{metaInfo}</pre>
+                            </div>
+                          </div>
+                        )}
+                        {!accInfo && !metaInfo && (
+                          <p className="text-sm text-slate-500 italic mt-4 border-t border-slate-800 pt-4">No advanced server data or metadata overrides found for this playlist.</p>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* === RENAME UI === */}
               {modal.type === 'rename' && (
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">New Name</label>
@@ -332,6 +408,7 @@ export default function Sources() {
                 </div>
               )}
 
+              {/* === XTREAM REFRESH UI === */}
               {modal.type === 'xtream' && (
                 <>
                   <p className="text-xs text-yellow-500 bg-yellow-500/10 p-2 rounded border border-yellow-500/20">Security Note: We do not save Xtream passwords in the database. You must provide them to refresh.</p>
@@ -346,6 +423,7 @@ export default function Sources() {
                 </>
               )}
 
+              {/* === STALKER REFRESH UI === */}
               {modal.type === 'stalker' && (
                 <>
                   <p className="text-xs text-yellow-500 bg-yellow-500/10 p-2 rounded border border-yellow-500/20">Security Note: We do not save MAC Addresses in the database. You must provide it to refresh.</p>
@@ -356,18 +434,21 @@ export default function Sources() {
                 </>
               )}
 
-              <button 
-                onClick={() => {
-                  if (modal.type === 'rename') submitRename();
-                  else if (modal.type === 'xtream') executeRefresh(modal.sourceId!, { username: xtreamUser, password: xtreamPass });
-                  else if (modal.type === 'stalker') executeRefresh(modal.sourceId!, { macAddress: stalkerMac });
-                }}
-                disabled={isSubmitDisabled}
-                className="w-full mt-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-400 text-white font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
-              >
-                {modalSubmitting && <Loader2 size={18} className="animate-spin" />}
-                {modal.type === 'rename' ? 'Save Name' : 'Refresh Channels'}
-              </button>
+              {/* Submit Buttons (Hidden for 'Info' modal) */}
+              {modal.type !== 'info' && (
+                <button 
+                  onClick={() => {
+                    if (modal.type === 'rename') submitRename();
+                    else if (modal.type === 'xtream') executeRefresh(modal.sourceId!, { username: xtreamUser, password: xtreamPass });
+                    else if (modal.type === 'stalker') executeRefresh(modal.sourceId!, { macAddress: stalkerMac });
+                  }}
+                  disabled={isSubmitDisabled}
+                  className="w-full mt-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-400 text-white font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  {modalSubmitting && <Loader2 size={18} className="animate-spin" />}
+                  {modal.type === 'rename' ? 'Save Name' : 'Refresh Channels'}
+                </button>
+              )}
             </div>
           </div>
         </div>
