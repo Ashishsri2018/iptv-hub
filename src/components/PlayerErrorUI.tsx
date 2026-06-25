@@ -13,7 +13,7 @@ interface PlayerErrorUIProps {
 
 export default function PlayerErrorUI({ errorUI, onRetryProxy, onPlayExternalProxy, onPlayExternalNative, proxyUrl, nativeUrl }: PlayerErrorUIProps) {
   const [copiedFeedback, setCopiedFeedback] = useState<string | null>(null);
-  const pressTimer = useRef<NodeJS.Timeout | null>(null);
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLongPress = useRef(false);
 
   // Starts the 600ms timer when you touch the button
