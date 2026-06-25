@@ -519,6 +519,47 @@ export default {
         }
       }
 
+      // ==========================================
+      // ADVANCED METADATA OVERRIDES (THE 3 TIERS)
+      // ==========================================
+
+      // Tier 1: Global Metadata Save
+      if (url.pathname === "/api/settings/metadata" && request.method === "PUT") {
+        const body = await request.json();
+        if (body && typeof body.global_metadata !== 'undefined') {
+          await env.DB.prepare("UPDATE settings SET global_metadata = ? WHERE id = 'global'")
+            .bind(body.global_metadata).run();
+          return Response.json({ success: true }, { headers: corsHeaders });
+        }
+        throw new Error("Invalid payload for global metadata");
+      }
+
+      // Tier 2: Playlist Metadata Save
+      const sourceMetaMatch = url.pathname.match(/^\/api\/sources\/(src_[^\/]+)\/metadata$/);
+      if (sourceMetaMatch && request.method === "PUT") {
+        const sourceId = sourceMetaMatch[1];
+        const body = await request.json();
+        if (body && typeof body.playlist_metadata !== 'undefined') {
+          await env.DB.prepare("UPDATE sources SET playlist_metadata = ? WHERE id = ?")
+            .bind(body.playlist_metadata, sourceId).run();
+          return Response.json({ success: true }, { headers: corsHeaders });
+        }
+        throw new Error("Invalid payload for playlist metadata");
+      }
+
+      // Tier 3: Specific Channel Metadata Save
+      const channelMetaMatch = url.pathname.match(/^\/api\/channels\/([^\/]+)\/metadata$/);
+      if (channelMetaMatch && request.method === "PUT") {
+        const channelId = channelMetaMatch[1];
+        const body = await request.json();
+        if (body && typeof body.raw_metadata !== 'undefined') {
+          await env.DB.prepare("UPDATE channels SET raw_metadata = ? WHERE id = ?")
+            .bind(body.raw_metadata, channelId).run();
+          return Response.json({ success: true }, { headers: corsHeaders });
+        }
+        throw new Error("Invalid payload for channel metadata");
+      }
+
       // FRONTEND ROUTING
       if (!url.pathname.startsWith("/api/")) {
         try {

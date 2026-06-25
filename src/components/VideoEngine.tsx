@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import Hls from 'hls.js';
 import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AudioLines, Subtitles } from 'lucide-react';
 import { useAppStore } from '../store';
@@ -12,7 +12,13 @@ interface VideoEngineProps {
 const PROXY_WORKER_URL = "https://iptv-proxy.ashishsri2018.workers.dev/";
 
 export default function VideoEngine({ streamUrl }: VideoEngineProps) {
-  const { channelName, settings } = useAppStore();
+  // Use 'any' cast temporarily to prevent TS errors if activeChannel/sources aren't in the store yet
+  const store: any = useAppStore();
+  const channelName = store.channelName;
+  const settings = store.settings;
+  const activeChannel = store.activeChannel;
+  const sources = store.sources || [];
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -55,7 +61,37 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
   const userTouchedSubtitles = useRef(false);
 
-  const proxyConfig = { url: streamUrl, userAgent: "VLC/3.0.0" };
+  // ==========================================
+  // THE METADATA RESOLUTION ENGINE (THE MERGE)
+  // ==========================================
+  const resolvedMetadata = useMemo(() => {
+    try {
+      // 1. Global (from settings table)
+      const global = settings?.global_metadata ? JSON.parse(settings.global_metadata) : {};
+      
+      // 2. Playlist (from sources table)
+      const source = sources.find((s: any) => s.id === activeChannel?.source_id);
+      const playlist = source?.playlist_metadata ? JSON.parse(source.playlist_metadata) : {};
+      
+      // 3. Channel (from channels table raw_metadata)
+      const channel = activeChannel?.raw_metadata ? JSON.parse(activeChannel.raw_metadata) : {};
+      
+      // Merge Cascade: Global is overwritten by Playlist, which is overwritten by Channel
+      return { ...global, ...playlist, ...channel };
+    } catch (e) {
+      console.error("Metadata parsing error:", e);
+      return {};
+    }
+  }, [settings, sources, activeChannel]);
+
+  // Feed the winning metadata into the Cloudflare Proxy Config
+  const proxyConfig = { 
+    url: streamUrl, 
+    // Checks for common M3U header variations
+    userAgent: resolvedMetadata['http-user-agent'] || resolvedMetadata['user-agent'] || resolvedMetadata['User-Agent'] || "VLC/3.0.0",
+    referer: resolvedMetadata['http-referrer'] || resolvedMetadata['referer'] || resolvedMetadata['Referer'] || "",
+    origin: resolvedMetadata['Origin'] || resolvedMetadata['origin'] || ""
+  };
   const proxyEncoded = btoa(unescape(encodeURIComponent(JSON.stringify(proxyConfig))));
   const computedProxyUrl = `${PROXY_WORKER_URL}?cfg=${proxyEncoded}`;
 
@@ -130,7 +166,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       setIsBuffering(false);
     };
     
-    // STRICT, SIMPLE PIP LOGIC: It's just a display mode toggle.
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     const handleLeavePip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
 
@@ -295,7 +330,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       video.removeAttribute('src'); 
       video.load();
     };
-  }, [streamUrl, retryCount, settings, useProxy]);
+  }, [streamUrl, retryCount, settings, useProxy, computedProxyUrl]);
 
   const toggleMenu = (menu: 'quality' | 'audio' | 'subtitles') => {
     const nextMenu = activeMenu === menu ? null : menu;
