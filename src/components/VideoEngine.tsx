@@ -18,7 +18,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const hlsRef = useRef<Hls | null>(null);
 
   const intendedPlayState = useRef(true);
-  const lastPauseTimeRef = useRef(0); // NEW: Tracks exactly when the video paused
+  const lastPauseTimeRef = useRef(0);
 
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -57,6 +57,11 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const [subtitleTracks, setSubtitleTracks] = useState<any[]>([]);
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
   const userTouchedSubtitles = useRef(false);
+
+  // NEW: Pre-calculate the Proxy URL cleanly so we can pass it to the ErrorUI for copying
+  const proxyConfig = { url: streamUrl, userAgent: "VLC/3.0.0" };
+  const proxyEncoded = btoa(unescape(encodeURIComponent(JSON.stringify(proxyConfig))));
+  const computedProxyUrl = `${PROXY_WORKER_URL}?cfg=${proxyEncoded}`;
 
   const formatTime = (seconds: number) => {
     if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "00:00";
@@ -126,7 +131,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     
     const handleNativePause = () => {
       setIsPlaying(false);
-      lastPauseTimeRef.current = Date.now(); // Log the exact millisecond a pause happened
+      lastPauseTimeRef.current = Date.now();
     };
     
     const handleNativeWaiting = () => setIsBuffering(true);
@@ -150,7 +155,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     
-    // THE ULTIMATE PIP EXIT HANDLER
     const handleLeavePip = () => {
       window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
       
@@ -158,17 +162,14 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         const video = videoRef.current;
         if (!video) return;
 
-        // Calculate if a 'pause' event happened within the last 300ms
         const timeSincePause = Date.now() - lastPauseTimeRef.current;
         const clickedXInChrome = timeSincePause < 300; 
 
-        // If it was X in Chrome (instant pause) OR X in Firefox (app is hidden in background)
         if (clickedXInChrome || document.hidden) {
-           video.pause(); // Kills Firefox ghost audio instantly
+           video.pause(); 
            intendedPlayState.current = false;
            window.dispatchEvent(new CustomEvent('force-close-player'));
         } else {
-           // App is visible and didn't instantly pause. It's a clean Restore!
            if (intendedPlayState.current) video.play().catch(() => {});
         }
       }, 150);
@@ -200,10 +201,9 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     const initializePlayer = () => {
       let activeStreamUrl = streamUrl;
       
+      // Use the pre-calculated Proxy URL
       if (useProxy) {
-        const config = { url: streamUrl, userAgent: "VLC/3.0.0" };
-        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
-        activeStreamUrl = `${PROXY_WORKER_URL}?cfg=${encoded}`;
+        activeStreamUrl = computedProxyUrl;
       }
 
       if (window.location.protocol === 'https:' && activeStreamUrl.startsWith('http://')) {
@@ -495,12 +495,13 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const launchExternalPlayer = (forceProxy: boolean = false) => {
     try {
       const isAndroid = /Android/i.test(navigator.userAgent);
+      
+      // Use the pre-calculated computed URL safely
       let targetUrl = streamUrl;
       if (forceProxy) {
-        const config = { url: streamUrl, userAgent: "VLC/3.0.0" };
-        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
-        targetUrl = `${PROXY_WORKER_URL}?cfg=${encoded}`;
+        targetUrl = computedProxyUrl;
       }
+      
       if (isAndroid) {
         const match = targetUrl.match(/^([a-zA-Z0-9]+):\/\/(.*)$/);
         if (match) {
@@ -544,12 +545,15 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         />
       )}
 
+      {/* NEW ERROR UI PROP PASSING */}
       {hasFatalError && (
         <PlayerErrorUI 
           errorUI={errorUI}
           onRetryProxy={handleRetryProxy}
           onPlayExternalProxy={() => launchExternalPlayer(true)}
           onPlayExternalNative={() => launchExternalPlayer(false)}
+          proxyUrl={computedProxyUrl}
+          nativeUrl={streamUrl}
         />
       )}
 
