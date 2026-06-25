@@ -195,11 +195,46 @@ export default function Sources() {
     }
   };
 
-  // UI HELPER: Safely formats JSON blobs into readable strings
+  // SMART UI HELPER: Safely formats JSON and dynamically converts UNIX timestamps
   const formatJson = (str?: string) => {
     if (!str || str === '{}' || str.trim() === '') return null;
-    try { return JSON.stringify(JSON.parse(str), null, 2); } 
-    catch { return str; }
+    try { 
+      const parsed = JSON.parse(str);
+      
+      // Recursive function to find and convert timestamps
+      const transformDates = (obj: any): any => {
+        if (Array.isArray(obj)) return obj.map(transformDates);
+        if (obj !== null && typeof obj === 'object') {
+          const newObj: any = {};
+          for (const key in obj) {
+            const val = obj[key];
+            const strVal = String(val);
+            
+            // Look for keys that usually contain dates/times
+            const isDateKey = /(date|time|created|exp|updated|added)/i.test(key);
+            // Check for 10-digit (seconds) or 13-digit (ms) Unix timestamps
+            const isSeconds = /^[1-9]\d{9}$/.test(strVal);
+            const isMillis = /^[1-9]\d{12}$/.test(strVal);
+            
+            if (isDateKey && (isSeconds || isMillis)) {
+              const ms = isSeconds ? Number(val) * 1000 : Number(val);
+              const date = new Date(ms);
+              if (!isNaN(date.getTime())) {
+                newObj[key] = `${val} (${date.toLocaleString()})`;
+                continue;
+              }
+            }
+            newObj[key] = transformDates(val);
+          }
+          return newObj;
+        }
+        return obj;
+      };
+
+      return JSON.stringify(transformDates(parsed), null, 2); 
+    } catch { 
+      return str; 
+    }
   };
 
   if (loading) return <div className="flex items-center justify-center h-full"><Loader2 className="animate-spin text-blue-500" size={40} /></div>;
