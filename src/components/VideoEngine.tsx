@@ -17,9 +17,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
 
-  const intendedPlayState = useRef(true);
-  const lastPauseTimeRef = useRef(0);
-
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
   const [useProxy, setUseProxy] = useState(false);
@@ -58,7 +55,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
   const userTouchedSubtitles = useRef(false);
 
-  // NEW: Pre-calculate the Proxy URL cleanly so we can pass it to the ErrorUI for copying
   const proxyConfig = { url: streamUrl, userAgent: "VLC/3.0.0" };
   const proxyEncoded = btoa(unescape(encodeURIComponent(JSON.stringify(proxyConfig))));
   const computedProxyUrl = `${PROXY_WORKER_URL}?cfg=${proxyEncoded}`;
@@ -75,7 +71,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   useEffect(() => {
     setRetryCount(0);
     setUseProxy(false);
-    intendedPlayState.current = true;
   }, [streamUrl]);
 
   useEffect(() => {
@@ -128,57 +123,21 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     }, 15000);
 
     const handleNativePlay = () => setIsPlaying(true);
-    
-    const handleNativePause = () => {
-      setIsPlaying(false);
-      lastPauseTimeRef.current = Date.now();
-    };
-    
+    const handleNativePause = () => setIsPlaying(false);
     const handleNativeWaiting = () => setIsBuffering(true);
     const handleNativePlaying = () => {
       clearWatchdog();
       setIsBuffering(false);
     };
     
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        if (!document.pictureInPictureElement && videoRef.current) {
-           intendedPlayState.current = false;
-           videoRef.current.pause();
-        }
-      } else {
-        if (videoRef.current && intendedPlayState.current) {
-           videoRef.current.play().catch(() => {});
-        }
-      }
-    };
-
+    // STRICT, SIMPLE PIP LOGIC: It's just a display mode toggle.
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
-    
-    const handleLeavePip = () => {
-      window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
-      
-      setTimeout(() => {
-        const video = videoRef.current;
-        if (!video) return;
-
-        const timeSincePause = Date.now() - lastPauseTimeRef.current;
-        const clickedXInChrome = timeSincePause < 300; 
-
-        if (clickedXInChrome || document.hidden) {
-           video.pause(); 
-           intendedPlayState.current = false;
-           window.dispatchEvent(new CustomEvent('force-close-player'));
-        } else {
-           if (intendedPlayState.current) video.play().catch(() => {});
-        }
-      }, 150);
-    };
+    const handleLeavePip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
 
     const handleNativeMeta = () => {
       clearWatchdog();
       setIsBuffering(false);
-      if (intendedPlayState.current) video.play().catch(() => setIsPlaying(false));
+      video.play().catch(() => setIsPlaying(false));
     };
     
     const handleNativeError = () => {
@@ -194,14 +153,12 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     video.addEventListener('playing', handleNativePlaying);
     video.addEventListener('enterpictureinpicture', handleEnterPip);
     video.addEventListener('leavepictureinpicture', handleLeavePip);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
     video.addEventListener('loadedmetadata', handleNativeMeta);
     video.addEventListener('error', handleNativeError);
 
     const initializePlayer = () => {
       let activeStreamUrl = streamUrl;
       
-      // Use the pre-calculated Proxy URL
       if (useProxy) {
         activeStreamUrl = computedProxyUrl;
       }
@@ -278,7 +235,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
           }
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) processSubtitles(hls.subtitleTracks);
           setIsBuffering(false);
-          if (intendedPlayState.current) video.play().catch(() => setIsPlaying(false));
+          video.play().catch(() => setIsPlaying(false));
         });
 
         hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => setAutoLevel(data.level));
@@ -332,7 +289,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       video.removeEventListener('playing', handleNativePlaying);
       video.removeEventListener('enterpictureinpicture', handleEnterPip);
       video.removeEventListener('leavepictureinpicture', handleLeavePip);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
       video.removeEventListener('loadedmetadata', handleNativeMeta);
       video.removeEventListener('error', handleNativeError);
       if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
@@ -409,13 +365,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
   const togglePlay = () => {
     if (hasFatalError || !videoRef.current) return;
-    if (videoRef.current.paused) {
-      intendedPlayState.current = true;
-      videoRef.current.play().catch(() => {});
-    } else {
-      intendedPlayState.current = false;
-      videoRef.current.pause();
-    }
+    if (videoRef.current.paused) videoRef.current.play().catch(() => {});
+    else videoRef.current.pause();
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -496,7 +447,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     try {
       const isAndroid = /Android/i.test(navigator.userAgent);
       
-      // Use the pre-calculated computed URL safely
       let targetUrl = streamUrl;
       if (forceProxy) {
         targetUrl = computedProxyUrl;
@@ -545,7 +495,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         />
       )}
 
-      {/* NEW ERROR UI PROP PASSING */}
       {hasFatalError && (
         <PlayerErrorUI 
           errorUI={errorUI}

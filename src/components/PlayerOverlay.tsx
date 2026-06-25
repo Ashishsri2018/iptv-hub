@@ -26,20 +26,11 @@ export default function PlayerOverlay() {
   useEffect(() => {
     const handlePipChange = (e: Event) => setIsPipActive((e as CustomEvent).detail);
     
-    // Listens to the PiP Fixes we added in VideoEngine
-    const handleForceClose = () => {
-      setIsPipActive(false);
-      closePlayer();
-      if (window.history.state?.playerOpen) window.history.go(-1);
-    };
-    
     window.addEventListener('pip-status', handlePipChange);
-    window.addEventListener('force-close-player', handleForceClose);
     return () => {
       window.removeEventListener('pip-status', handlePipChange);
-      window.removeEventListener('force-close-player', handleForceClose);
     };
-  }, [closePlayer]);
+  }, []);
 
   if (!streamUrl) return null;
 
@@ -67,7 +58,6 @@ export default function PlayerOverlay() {
           </button>
         </div>
         
-        {/* Video Engine handles ALL streams and ALL errors now */}
         <div className="flex-1 w-full h-full bg-black relative">
           <VideoEngine streamUrl={streamUrl} />
         </div>
