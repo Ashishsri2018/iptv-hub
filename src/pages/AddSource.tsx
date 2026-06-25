@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
+import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle, Tv } from 'lucide-react';
 import { API_URL } from '../config';
 
 export default function AddSource() {
