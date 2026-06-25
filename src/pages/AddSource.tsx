@@ -46,21 +46,27 @@ export default function AddSource() {
     return name.replace(/[\[\]\(\)\{\}]/g, ' ').replace(/\s+/g, ' ').replace(/^\s*-\s*|\s*-\s*$/g, '').trim().slice(0, 120);
   };
 
-  // STRICT FIREWALL: Looks ONLY at the provider's URL API path (No extension checking!)
-  const isVodOrRadio = (streamUrl: string) => {
-    const lowerUrl = streamUrl.toLowerCase();
-    
-    if (lowerUrl.includes('/movie/') || lowerUrl.includes('/series/') || lowerUrl.includes('/vod/') || lowerUrl.includes('/radio/')) {
-      return true;
-    }
-    return false;
+  // METADATA FIREWALL: Looks ONLY at the provider's metadata tags. SKIPS VOD/Movies, ALLOWS Radio.
+  const isVod = (metadata: any) => {
+    const type = (metadata['tvg-type'] || metadata.type || '').toLowerCase().trim();
+    const group = (metadata['group-title'] || '').toLowerCase().trim();
+
+    // Check explicit provider metadata types for VOD/Movies
+    if (['vod', 'movie', 'series', 'cinema', 'film'].includes(type)) return true;
+    if (type.includes('vod') || type.includes('series') || type.includes('movie')) return true;
+
+    // Check strict group-title matches for VOD/Movies
+    if (group === 'vod' || group === 'vods' || group === 'movies' || group === 'series' || group === 'cinema') return true;
+    if (group.startsWith('vod ') || group.startsWith('vod-') || group.startsWith('movies ') || group.startsWith('movies-') || group.startsWith('series ') || group.startsWith('series-')) return true;
+
+    return false; // Not a VOD, so allow it!
   };
 
   const pushChannelLocally = (channels: any[], current: any, sourceId: string, urlCounts: Map<string, number>) => {
     if (!current.stream_url) return;
     
-    // URL-Only Firewall: Drop VOD/Movies/Radio instantly
-    if (isVodOrRadio(current.stream_url)) {
+    // Metadata Firewall: Drop VOD/Movies instantly based on playlist tags
+    if (isVod(current.raw_metadata)) {
       return; 
     }
 
@@ -78,7 +84,7 @@ export default function AddSource() {
     });
   };
 
-  // CLIENT-SIDE ADVANCED PARSER (Runs on Phone/Browser)
+  // CLIENT-SIDE ADVANCED PARSER (Runs on Phone/Browser for File Uploads and Home IP Fallback)
   const parseM3ULocally = (text: string, sourceId: string) => {
     const lines = text.split(/\r?\n/);
     const channels: any[] = [];
@@ -177,62 +183,76 @@ export default function AddSource() {
 
   const executeUrlImport = async (forceSourceId?: string) => {
     setLoading(true);
-    setStatus({ type: null, message: 'Testing connection from device...' });
-
     let finalName = nameInput.trim() || 'My Playlist';
     const tempSourceId = forceSourceId || `src_${crypto.randomUUID()}`;
 
     try {
-      let clientText = null;
-      let clientFetchSuccess = false;
+      // 1. PRIMARY ROUTE: Pass URL strictly to Cloudflare Worker
+      setStatus({ type: null, message: 'Routing fetch through Cloudflare Server...' });
+      
+      const res = await fetch(`${API_URL}/api/sources/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playlistUrl: urlInput, name: finalName, type: 'M3U URL', sourceId: forceSourceId })
+      });
+      
+      const data = await res.json();
+      
+      if (res.ok && !data.error) {
+        setStatus({ type: 'success', message: `Successfully imported ${data.count} channels via Cloudflare!` });
+        resetForm();
+        return; // Success! Exit early.
+      }
+      
+      // If Cloudflare fails (e.g. 403 Forbidden IP Block), throw to trigger fallback
+      throw new Error(data.error || "Cloudflare Server failed to process URL.");
+
+    } catch (cfError: any) {
+      console.warn("Cloudflare fetch failed:", cfError.message);
+      setStatus({ type: null, message: 'Cloudflare couldn\'t load the playlist. Falling back to Home IP...' });
 
       try {
+        // 2. FALLBACK ROUTE: Fetch using Home IP
         const response = await fetch(urlInput);
-        if (response.ok) {
-          clientText = await response.text();
-          clientFetchSuccess = true;
-          setStatus({ type: null, message: 'Device fetch successful. Parsing locally...' });
+        
+        // STRICT CONNECTION CHECK (Status 200)
+        if (!response.ok) {
+           throw new Error(`Device connection rejected with status: ${response.status}`);
         }
-      } catch (err) {
-        console.log("Client fetch failed. Falling back to Cloudflare Worker.", err);
-      }
+        
+        const clientText = await response.text();
+        if (!clientText.includes('#EXTM3U')) {
+           throw new Error("Invalid M3U file format received.");
+        }
 
-      if (clientFetchSuccess && clientText && clientText.includes('#EXTM3U')) {
+        setStatus({ type: null, message: 'Connected successfully! Parsing locally...' });
+        
         const channels = parseM3ULocally(clientText, tempSourceId);
-        if (channels.length === 0) throw new Error("File read successfully, but no valid channels found.");
+        if (channels.length === 0) throw new Error("No valid channels found (VODs were skipped).");
 
         setStatus({ type: null, message: `Parsed ${channels.length} channels. Uploading to Database...` });
 
+        // Bulk insert to Cloudflare in manageable chunks
         const CHUNK_SIZE = 5000;
         for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
            const chunk = channels.slice(i, i + CHUNK_SIZE);
-           const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
+           const bulkRes = await fetch(`${API_URL}/api/sources/import-bulk`, {
              method: 'POST',
              headers: { 'Content-Type': 'application/json' },
              body: JSON.stringify({ sourceId: tempSourceId, name: finalName, type: 'M3U URL', channels: chunk, url: urlInput })
            });
-           if (!res.ok) throw new Error(`Database rejected upload chunk: ${res.status}`);
+           if (!bulkRes.ok) throw new Error(`Database rejected upload chunk: ${bulkRes.status}`);
         }
         
         setStatus({ type: 'success', message: `Successfully added ${channels.length} channels using Home IP!` });
         resetForm();
-      } else {
-        setStatus({ type: null, message: 'Routing fetch through Cloudflare Server...' });
-        
-        const res = await fetch(`${API_URL}/api/sources/import`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ playlistUrl: urlInput, name: finalName, type: 'M3U URL', sourceId: forceSourceId })
+
+      } catch (homeError: any) {
+        setStatus({ 
+          type: 'error', 
+          message: `Import failed entirely.\nCloudflare: ${cfError.message}\nHome IP: ${homeError.message}` 
         });
-        
-        const data = await res.json();
-        if (!res.ok || data.error) throw new Error(data.error || "Server failed to process URL.");
-        
-        setStatus({ type: 'success', message: `Successfully imported ${data.count} channels via Cloudflare!` });
-        resetForm();
       }
-    } catch (error: any) {
-      setStatus({ type: 'error', message: error.message || 'Import failed. Check URL or provider blocks.' });
     } finally {
       setLoading(false);
     }
@@ -321,7 +341,7 @@ export default function AddSource() {
       
       const channels = parseM3ULocally(text, sourceId);
       
-      if (channels.length === 0) throw new Error("No readable channels found in file.");
+      if (channels.length === 0) throw new Error("No readable Live TV channels found in file (VODs skipped).");
       
       setStatus({ type: null, message: `Uploading ${channels.length} channels to Database...` });
       
@@ -371,7 +391,7 @@ export default function AddSource() {
       {status.message && (
         <div className={`mb-6 flex items-center gap-3 px-4 py-3 rounded-lg border text-sm font-medium animate-in fade-in ${status.type === 'error' ? 'bg-red-950/30 text-red-400 border-red-900/50' : status.type === 'success' ? 'bg-green-950/30 text-green-400 border-green-900/50' : 'bg-blue-950/30 text-blue-400 border-blue-900/50'}`}>
           {status.type === 'error' ? <AlertCircle size={18} /> : status.type === 'success' ? <CheckCircle size={18} /> : <Loader2 size={18} className="animate-spin" />}
-          <span className="flex-1 break-words">{status.message}</span>
+          <span className="flex-1 whitespace-pre-wrap">{status.message}</span>
         </div>
       )}
 
