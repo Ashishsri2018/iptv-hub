@@ -316,7 +316,15 @@ export default function Sources() {
 
                 {/* Action Buttons */}
                 <div className="flex items-center gap-2 sm:self-stretch pt-3 sm:pt-0 border-t border-slate-800 sm:border-t-0 sm:border-l sm:pl-4 shrink-0 justify-end">
-                  
+                      
+                  {/* SYNC ERROR WARNING */}
+    {source.account_info && source.account_info.includes('"sync_error"') && (
+      <div className="flex items-center gap-1.5 px-3 py-2 bg-red-950/40 text-red-400 border border-red-900/50 rounded-lg mr-2" title={JSON.parse(source.account_info).sync_error}>
+        <AlertCircle size={16} className="animate-pulse" />
+        <span className="text-xs font-bold uppercase tracking-wider hidden md:block">Sync Failed - Try Manually</span>
+      </div>
+    )}
+
                   {/* NEW INFO BUTTON */}
                   <button 
                     onClick={() => setModal({ type: 'info', sourceId: source.id, sourceName: source.name, sourceObj: source })}

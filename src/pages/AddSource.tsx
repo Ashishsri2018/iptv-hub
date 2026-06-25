@@ -1,402 +1,352 @@
-import { useState, useRef, useEffect } from 'react';
-import { Link, Upload, Server, Tv2, Loader2, CheckCircle, AlertTriangle, Eye, EyeOff } from 'lucide-react';
+import React, { useState } from 'react';
+import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
 import { API_URL } from '../config';
 
-type Tab = 'm3u-url' | 'm3u-file' | 'xtream' | 'stalker';
-type StatusState = 'idle' | 'loading' | 'success' | 'error';
-
-interface Status {
-  state: StatusState;
-  message: string;
-  details: string;
-}
-
 export default function AddSource() {
-  const [activeTab, setActiveTab] = useState<Tab>('m3u-url');
+  const [activeTab, setActiveTab] = useState<'url' | 'file' | 'xtream' | 'stalker'>('url');
   
-  // Shared States
-  const [nameInput, setNameInput] = useState('');
-  const [status, setStatus] = useState<Status>({ state: 'idle', message: '', details: '' });
-  
-  // Specific Form States
+  // URL State
   const [urlInput, setUrlInput] = useState('');
-  const [file, setFile] = useState<File | null>(null);
+  const [nameInput, setNameInput] = useState('');
   
-  const [xtreamUrl, setXtreamUrl] = useState('');
-  const [xtreamUser, setXtreamUser] = useState('');
-  const [xtreamPass, setXtreamPass] = useState('');
-  const [showXtreamPass, setShowXtreamPass] = useState(false);
+  // File State
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileNameInput, setFileNameInput] = useState('');
   
-  const [stalkerUrl, setStalkerUrl] = useState('');
-  const [stalkerMac, setStalkerMac] = useState('');
-  const [showStalkerMac, setShowStalkerMac] = useState(false);
-  
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  // API States
+  const [serverUrl, setServerUrl] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [macAddress, setMacAddress] = useState('');
 
-  // Cleanup fetches if component unmounts
-  useEffect(() => {
-    return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<{ type: 'success' | 'error' | null, message: string }>({ type: null, message: '' });
+
+  const resetForm = () => {
+    setUrlInput(''); setNameInput('');
+    setSelectedFile(null); setFileNameInput('');
+    setServerUrl(''); setUsername(''); setPassword(''); setMacAddress('');
+  };
+
+  const generateStableId = (sourceId: string, streamUrl: string, count: number) => {
+    let hash = 5381;
+    for (let i = 0; i < streamUrl.length; i++) hash = (hash * 33) ^ streamUrl.charCodeAt(i);
+    const hashStr = (hash >>> 0).toString(36);
+    const tail = streamUrl.replace(/[^a-zA-Z0-9]/g, '').slice(-15);
+    return `${sourceId}_${hashStr}_${tail}_${count}`;
+  };
+
+  // CLIENT-SIDE SPONGE PARSER (Runs on Phone/Browser)
+  const parseM3ULocally = (text: string, sourceId: string) => {
+    const lines = text.split('\n');
+    const channels = [];
+    let currentChannel: any = {};
+    let currentMetadata: any = {};
+    const urlCounts: Record<string, number> = {};
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      if (line.startsWith('#EXTINF:')) {
+        currentMetadata = {};
+        const attributes = line.matchAll(/([a-zA-Z0-9-]+)="([^"]+)"/g);
+        for (const match of attributes) currentMetadata[match[1]] = match[2];
+        
+        currentChannel.channel_group = currentMetadata['group-title'] || 'Other';
+        currentChannel.logo_url = currentMetadata['tvg-logo'] || null;
+        
+        const commaSplit = line.split(',');
+        currentChannel.name = commaSplit.length > 1 ? commaSplit[commaSplit.length - 1].trim() : 'Unknown';
+      } 
+      else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#EXTHTTP:')) {
+         const optMatch = line.match(/#EXT[A-Z]+:([^=]+)=(.*)/);
+         if (optMatch) {
+           let key = optMatch[1].trim(); let val = optMatch[2].trim();
+           if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+           currentMetadata[key] = val;
+         }
+      } 
+      else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
+        currentChannel.stream_url = line;
+        urlCounts[line] = (urlCounts[line] || 0) + 1;
+        currentChannel.id = generateStableId(sourceId, line, urlCounts[line]);
+        currentChannel.raw_metadata = JSON.stringify(currentMetadata);
+        
+        channels.push({ ...currentChannel });
+        currentChannel = {};
+        currentMetadata = {};
       }
-    };
-  }, []);
-
-  // Helpers
-  const handleError = (error: any, context: string) => {
-    console.error(context, error);
-    setStatus({ 
-      state: 'error', 
-      message: `Failed to add ${activeTab} source.`, 
-      details: error.message || "Unknown system error occurred."
-    });
-  };
-
-  const isValidUrl = (str: string) => {
-    try { 
-      const u = new URL(str); 
-      return ['http:', 'https:'].includes(u.protocol); 
-    } catch { 
-      return false; 
     }
+    return channels;
   };
 
-  const isValidMac = (str: string) => /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(str);
+  const handleUrlSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!urlInput) return setStatus({ type: 'error', message: 'URL is required.' });
 
-  const safeJson = async (res: Response) => {
-    try { 
-      return await res.json(); 
-    } catch { 
-      throw new Error('Invalid JSON response from server.'); 
-    }
-  };
+    setLoading(true);
+    setStatus({ type: null, message: 'Testing connection from device...' });
 
-  // 1. M3U URL Processor
-  const processM3UUrl = async () => {
-    if (!urlInput || !nameInput) return;
-    if (!isValidUrl(urlInput)) return handleError(new Error("Invalid URL format."), "Validation");
-
-    abortControllerRef.current = new AbortController();
-    setStatus({ state: 'loading', message: 'Commanding server to download and parse URL...', details: '' });
+    let finalName = nameInput.trim() || 'My Playlist';
+    const tempSourceId = `src_${crypto.randomUUID()}`;
 
     try {
-      const response = await fetch(`${API_URL}/api/sources/import`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playlistUrl: urlInput, name: nameInput, type: 'M3U URL' }),
-        signal: abortControllerRef.current.signal
-      });
+      // 1. ATTEMPT HOME-IP FETCH FIRST
+      let clientText = null;
+      let clientFetchSuccess = false;
 
-      const data = await safeJson(response);
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-
-      setStatus({ state: 'success', message: `Success! Added ${data.count} channels.`, details: '' });
-      setUrlInput(''); setNameInput('');
-    } catch (error: any) { 
-      if (error.name !== 'AbortError') handleError(error, "M3U URL Error"); 
-    }
-  };
-
-  // 2. M3U File Processor (Memory Safe Chunking + Deterministic IDs)
-  const processM3UFile = async () => {
-    if (!file || !nameInput) return;
-    
-    abortControllerRef.current = new AbortController();
-    setStatus({ state: 'loading', message: 'Reading local file...', details: '' });
-
-    try {
-      const text = await file.text();
-      setStatus({ state: 'loading', message: 'Parsing and uploading in chunks...', details: '' });
-
-      // Deterministic ID prevents duplicate playlists if a batch fails and user clicks retry
-      const safeFileName = file.name.replace(/[^a-zA-Z0-9]/g, '');
-      const sourceId = `src_${safeFileName}_${file.size}`.substring(0, 25);
-
-      const lines = text.split('\n');
-      let currentBatch: any[] = [];
-      let currentChannel: any = {};
-      let totalUploaded = 0;
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('#EXTINF:')) {
-          const groupMatch = line.match(/group-title="([^"]+)"/i);
-          currentChannel.channel_group = groupMatch ? groupMatch[1] : 'Other';
-          const logoMatch = line.match(/tvg-logo="([^"]+)"/i);
-          currentChannel.logo_url = logoMatch ? logoMatch[1] : null;
-          const commaSplit = line.split(',');
-          currentChannel.name = commaSplit.length > 1 ? commaSplit[commaSplit.length - 1].trim() : 'Unknown';
-        } else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
-          currentChannel.stream_url = line;
-          currentChannel.id = `${sourceId}_${totalUploaded + currentBatch.length}`; 
-          currentBatch.push({ ...currentChannel });
-          currentChannel = {};
-
-          // Flush to DB and clear memory every 500 lines to prevent browser crashes
-          if (currentBatch.length >= 500) {
-            const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ sourceId, name: nameInput, type: 'M3U File', channels: currentBatch }),
-              signal: abortControllerRef.current.signal
-            });
-            const errData = await safeJson(res);
-            if (!res.ok) throw new Error(errData.error || `Batch upload failed.`);
-            
-            totalUploaded += currentBatch.length;
-            currentBatch = []; // Free RAM instantly
-            setStatus({ state: 'loading', message: `Uploaded ${totalUploaded} channels...`, details: '' });
-          }
+      try {
+        const response = await fetch(urlInput);
+        if (response.ok) {
+          clientText = await response.text();
+          clientFetchSuccess = true;
+          setStatus({ type: null, message: 'Device fetch successful. Parsing locally...' });
         }
+      } catch (err) {
+        // CORS error or device offline. Silent fail, we fallback to worker.
+        console.log("Client fetch failed (CORS or Network). Falling back to Cloudflare Worker.", err);
       }
 
-      // Flush remaining channels
-      if (currentBatch.length > 0) {
-        const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
+      if (clientFetchSuccess && clientText && clientText.includes('#EXTM3U')) {
+        // 2. PARSE AND BULK UPLOAD (Home IP Bypass)
+        const channels = parseM3ULocally(clientText, tempSourceId);
+        if (channels.length === 0) throw new Error("File read successfully, but no valid channels found.");
+
+        setStatus({ type: null, message: `Parsed ${channels.length} channels. Uploading to Database...` });
+
+        // Bulk insert in chunks of 5000 to avoid overloading request size
+        const CHUNK_SIZE = 5000;
+        for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
+           const chunk = channels.slice(i, i + CHUNK_SIZE);
+           const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ sourceId: tempSourceId, name: finalName, type: 'M3U URL', channels: chunk, url: urlInput })
+           });
+           if (!res.ok) throw new Error(`Database rejected upload chunk: ${res.status}`);
+        }
+        
+        setStatus({ type: 'success', message: `Successfully added ${channels.length} channels using Home IP!` });
+        resetForm();
+      } else {
+        // 3. FALLBACK: USE CLOUDFLARE WORKER
+        setStatus({ type: null, message: 'Routing fetch through Cloudflare Server...' });
+        
+        const res = await fetch(`${API_URL}/api/sources/import`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sourceId, name: nameInput, type: 'M3U File', channels: currentBatch }),
-          signal: abortControllerRef.current.signal
+          body: JSON.stringify({ playlistUrl: urlInput, name: finalName, type: 'M3U URL' })
         });
-        const errData = await safeJson(res);
-        if (!res.ok) throw new Error(errData.error || `Final batch upload failed.`);
-        totalUploaded += currentBatch.length;
+        
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || "Server failed to process URL.");
+        
+        setStatus({ type: 'success', message: `Successfully imported ${data.count} channels via Cloudflare!` });
+        resetForm();
       }
-
-      if (totalUploaded === 0) throw new Error("No playable streams found in file.");
-
-      setStatus({ state: 'success', message: `Success! Added ${totalUploaded} channels.`, details: '' });
-      setFile(null); setNameInput('');
-      if (fileInputRef.current) fileInputRef.current.value = '';
-
-    } catch (error: any) { 
-      if (error.name !== 'AbortError') handleError(error, "M3U File Error"); 
+    } catch (error: any) {
+      setStatus({ type: 'error', message: error.message || 'Import failed. Check URL or provider blocks.' });
+    } finally {
+      setLoading(false);
     }
   };
 
-  // 3. Xtream Codes Processor
-  const processXtream = async () => {
-    if (!xtreamUrl || !xtreamUser || !xtreamPass || !nameInput) return;
-    if (!isValidUrl(xtreamUrl)) return handleError(new Error("Invalid Server URL format."), "Validation");
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      setSelectedFile(e.target.files[0]);
+      if (!fileNameInput) {
+        setFileNameInput(e.target.files[0].name.replace('.m3u', '').replace('.m3u8', ''));
+      }
+    }
+  };
 
-    abortControllerRef.current = new AbortController();
-    setStatus({ state: 'loading', message: 'Authenticating with Xtream API...', details: '' });
+  const handleFileSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedFile) return setStatus({ type: 'error', message: 'Please select an M3U file.' });
+    
+    setLoading(true);
+    setStatus({ type: null, message: 'Reading file locally...' });
+    
+    try {
+      const text = await selectedFile.text();
+      if (!text.includes('#EXTM3U')) throw new Error("Invalid M3U file format.");
+      
+      const sourceId = `src_local_${crypto.randomUUID()}`;
+      const finalName = fileNameInput.trim() || selectedFile.name;
+      const channels = parseM3ULocally(text, sourceId);
+      
+      if (channels.length === 0) throw new Error("No readable channels found in file.");
+      
+      setStatus({ type: null, message: `Uploading ${channels.length} channels to Database...` });
+      
+      const CHUNK_SIZE = 5000;
+      for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
+         const chunk = channels.slice(i, i + CHUNK_SIZE);
+         const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ sourceId, name: finalName, type: 'M3U File', channels: chunk })
+         });
+         if (!res.ok) throw new Error("Database upload failed.");
+      }
+      
+      setStatus({ type: 'success', message: `Uploaded ${channels.length} channels successfully!` });
+      resetForm();
+    } catch (err: any) {
+      setStatus({ type: 'error', message: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApiSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!serverUrl) return setStatus({ type: 'error', message: 'Server URL required.' });
+
+    setLoading(true);
+    setStatus({ type: null, message: 'Connecting to Server API...' });
+
+    let endpoint = activeTab === 'xtream' ? '/api/sources/import-xtream' : '/api/sources/import-stalker';
+    let payload: any = { serverUrl, name: nameInput || `${activeTab.toUpperCase()} Server` };
+    
+    if (activeTab === 'xtream') {
+      if (!username || !password) { setLoading(false); return setStatus({ type: 'error', message: 'Username & Password required.' }); }
+      payload.username = username; payload.password = password;
+    } else {
+      if (!macAddress) { setLoading(false); return setStatus({ type: 'error', message: 'MAC Address required.' }); }
+      payload.macAddress = macAddress;
+    }
 
     try {
-      const response = await fetch(`${API_URL}/api/sources/import-xtream`, {
+      const res = await fetch(`${API_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serverUrl: xtreamUrl, username: xtreamUser, password: xtreamPass, name: nameInput }),
-        signal: abortControllerRef.current.signal
+        body: JSON.stringify(payload)
       });
-
-      const data = await safeJson(response);
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-
-      setStatus({ state: 'success', message: `Success! Synced ${data.count} Xtream channels.`, details: '' });
-      setXtreamUrl(''); setXtreamUser(''); setXtreamPass(''); setNameInput('');
-      setShowXtreamPass(false); // Reset visibility for security
-    } catch (error: any) { 
-      if (error.name !== 'AbortError') handleError(error, "Xtream API Error"); 
+      
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "API Connection failed.");
+      
+      setStatus({ type: 'success', message: `Connected! Imported ${data.count} channels.` });
+      resetForm();
+    } catch (error: any) {
+      setStatus({ type: 'error', message: error.message });
+    } finally {
+      setLoading(false);
     }
   };
-
-  // 4. Stalker Portal Processor
-  const processStalker = async () => {
-    if (!stalkerUrl || !stalkerMac || !nameInput) return;
-    if (!isValidUrl(stalkerUrl)) return handleError(new Error("Invalid Portal URL format."), "Validation");
-    if (!isValidMac(stalkerMac)) return handleError(new Error("Invalid MAC Address. Use format: 00:1A:79:XX:YY:ZZ"), "Validation");
-
-    abortControllerRef.current = new AbortController();
-    setStatus({ state: 'loading', message: 'Performing Stalker Portal Handshake...', details: '' });
-
-    try {
-      const response = await fetch(`${API_URL}/api/sources/import-stalker`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serverUrl: stalkerUrl, macAddress: stalkerMac, name: nameInput }),
-        signal: abortControllerRef.current.signal
-      });
-
-      const data = await safeJson(response);
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-
-      setStatus({ state: 'success', message: `Success! Synced ${data.count} Stalker channels.`, details: '' });
-      setStalkerUrl(''); setStalkerMac(''); setNameInput('');
-      setShowStalkerMac(false); // Reset visibility for security
-    } catch (error: any) { 
-      if (error.name !== 'AbortError') handleError(error, "Stalker API Error"); 
-    }
-  };
-
-  const renderErrorBlock = () => (
-    <div className="mt-4 p-4 bg-red-950/30 border border-red-900/50 rounded-lg flex flex-col gap-2 animate-in fade-in">
-      <div className="flex items-center gap-2 text-red-400 font-bold">
-        <AlertTriangle size={20} /> System Error Captured
-      </div>
-      <p className="text-red-300 text-sm">{status.message}</p>
-      <div className="bg-black/50 p-2 rounded border border-red-900 overflow-x-auto custom-scrollbar">
-        <code className="text-xs text-red-400 font-mono whitespace-pre-wrap break-all">{status.details}</code>
-      </div>
-    </div>
-  );
 
   return (
-    <div className="p-4 md:p-6 max-w-3xl mx-auto h-full overflow-y-auto custom-scrollbar pb-32">
-      <h2 className="text-2xl font-semibold mb-6 text-slate-100">Add Data Source</h2>
-      
-      <div className="flex overflow-x-auto bg-slate-950 rounded-lg p-1 mb-6 border border-slate-800 shrink-0 custom-scrollbar">
+    <div className="p-4 md:p-6 max-w-2xl mx-auto h-full overflow-y-auto custom-scrollbar pb-32">
+      <div className="flex items-center gap-3 mb-8">
+        <Plus className="text-blue-500" size={28} />
+        <h2 className="text-2xl font-bold text-slate-100 tracking-wide">Add New Source</h2>
+      </div>
+
+      <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-800 mb-8 overflow-x-auto custom-scrollbar">
         {[
-          { id: 'm3u-url', label: 'M3U URL', icon: <Link size={18} /> },
-          { id: 'm3u-file', label: 'M3U FILE', icon: <Upload size={18} /> },
-          { id: 'xtream', label: 'XTREAM', icon: <Server size={18} /> },
-          { id: 'stalker', label: 'STALKER', icon: <Tv2 size={18} /> }
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => { setActiveTab(tab.id as Tab); setStatus({ state: 'idle', message: '', details: '' }); }}
-            className={`flex items-center gap-2 px-4 py-3 rounded-md text-sm font-medium transition-colors flex-1 justify-center whitespace-nowrap
-              ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-100 hover:bg-slate-900'}
-            `}
+          { id: 'url', icon: LinkIcon, label: 'M3U URL' },
+          { id: 'file', icon: FileText, label: 'Local File' },
+          { id: 'xtream', icon: Tv, label: 'Xtream API' },
+          { id: 'stalker', icon: Tv, label: 'Stalker Portal' }
+        ].map(tab => (
+          <button 
+            key={tab.id} onClick={() => { setActiveTab(tab.id as any); setStatus({ type: null, message: '' }); }}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-md text-sm font-medium transition-all min-w-[120px] ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
           >
-            {tab.icon} {tab.label}
+            <tab.icon size={16} /> {tab.label}
           </button>
         ))}
       </div>
 
-      <div className="bg-slate-900 border border-slate-800 rounded-lg p-6 mb-8">
-        
-        {/* SHARED NAME INPUT */}
-        <div className="mb-5">
-          <label className="block text-sm font-medium text-slate-400 mb-1">Source Label (Name)</label>
-          <input 
-            type="text" value={nameInput} onChange={(e) => setNameInput(e.target.value)}
-            placeholder="e.g., My Premium Sports" 
-            className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" 
-            disabled={status.state === 'loading'}
-          />
+      {status.message && (
+        <div className={`mb-6 flex items-center gap-3 px-4 py-3 rounded-lg border text-sm font-medium animate-in fade-in ${status.type === 'error' ? 'bg-red-950/30 text-red-400 border-red-900/50' : status.type === 'success' ? 'bg-green-950/30 text-green-400 border-green-900/50' : 'bg-blue-950/30 text-blue-400 border-blue-900/50'}`}>
+          {status.type === 'error' ? <AlertCircle size={18} /> : status.type === 'success' ? <CheckCircle size={18} /> : <Loader2 size={18} className="animate-spin" />}
+          <span className="flex-1 break-words">{status.message}</span>
         </div>
+      )}
 
-        {/* 1. M3U URL */}
-        {activeTab === 'm3u-url' && (
-          <div className="flex flex-col gap-5">
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Playlist URL</label>
-              <input 
-                type="url" value={urlInput} onChange={(e) => setUrlInput(e.target.value)}
-                placeholder="https://example.com/playlist.m3u" 
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" 
-                disabled={status.state === 'loading'}
-              />
-            </div>
-            <button onClick={processM3UUrl} disabled={status.state === 'loading' || !urlInput || !nameInput} className="bg-blue-600 disabled:bg-blue-600/50 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors mt-2 flex justify-center items-center gap-2">
-              {status.state === 'loading' ? <Loader2 className="animate-spin" size={20} /> : 'Process on Server'}
-            </button>
+      {/* M3U URL FORM */}
+      {activeTab === 'url' && (
+        <form onSubmit={handleUrlSubmit} className="space-y-5 bg-slate-900 border border-slate-800 p-5 md:p-6 rounded-xl shadow-sm">
+          <div>
+            <label className="block text-sm font-medium text-slate-400 mb-1.5">Playlist Name</label>
+            <input type="text" value={nameInput} onChange={e => setNameInput(e.target.value)} disabled={loading} placeholder="e.g. My Premium IPTV" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors" />
           </div>
-        )}
-
-        {/* 2. M3U FILE */}
-        {activeTab === 'm3u-file' && (
-          <div className="flex flex-col gap-5">
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Local Playlist File</label>
-              <input 
-                type="file" accept=".m3u,.m3u8,text/plain,.txt" ref={fileInputRef} onChange={(e) => setFile(e.target.files?.[0] || null)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2.5 text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-900/30 file:text-blue-400 hover:file:bg-blue-900/50 cursor-pointer" 
-                disabled={status.state === 'loading'}
-              />
-            </div>
-            <button onClick={processM3UFile} disabled={status.state === 'loading' || !file || !nameInput} className="bg-blue-600 disabled:bg-blue-600/50 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors mt-2 flex justify-center items-center gap-2">
-              {status.state === 'loading' ? <Loader2 className="animate-spin" size={20} /> : 'Parse & Upload File'}
-            </button>
+          <div>
+            <label className="block text-sm font-medium text-slate-400 mb-1.5">M3U URL <span className="text-red-500">*</span></label>
+            <input type="url" required value={urlInput} onChange={e => setUrlInput(e.target.value)} disabled={loading} placeholder="http://example.com/playlist.m3u" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors" />
           </div>
-        )}
+          <button type="submit" disabled={loading || !urlInput} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-colors mt-2">
+            {loading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+            {loading ? 'Processing...' : 'Import Playlist'}
+          </button>
+        </form>
+      )}
 
-        {/* 3. XTREAM CODES */}
-        {activeTab === 'xtream' && (
-          <div className="flex flex-col gap-5">
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Server URL</label>
-              <input type="url" value={xtreamUrl} onChange={(e) => setXtreamUrl(e.target.value)} placeholder="http://domain.com:port" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" disabled={status.state === 'loading'} />
-            </div>
-            <div className="flex gap-4">
-              <div className="flex-1">
-                <label className="block text-sm font-medium text-slate-400 mb-1">Username</label>
-                <input type="text" value={xtreamUser} onChange={(e) => setXtreamUser(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" disabled={status.state === 'loading'} />
-              </div>
-              <div className="flex-1">
-                <label className="block text-sm font-medium text-slate-400 mb-1">Password</label>
-                <div className="relative">
-                  <input 
-                    type={showXtreamPass ? "text" : "password"} 
-                    value={xtreamPass} 
-                    onChange={(e) => setXtreamPass(e.target.value)} 
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-4 pr-10 py-3 text-slate-100 focus:outline-none focus:border-blue-500" 
-                    disabled={status.state === 'loading'} 
-                  />
-                  <button 
-                    type="button" 
-                    onClick={() => setShowXtreamPass(!showXtreamPass)} 
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
-                    disabled={status.state === 'loading'}
-                  >
-                    {showXtreamPass ? <EyeOff size={18} /> : <Eye size={18} />}
-                  </button>
-                </div>
+      {/* LOCAL FILE FORM */}
+      {activeTab === 'file' && (
+        <form onSubmit={handleFileSubmit} className="space-y-5 bg-slate-900 border border-slate-800 p-5 md:p-6 rounded-xl shadow-sm">
+          <div>
+            <label className="block text-sm font-medium text-slate-400 mb-1.5">Playlist Name</label>
+            <input type="text" value={fileNameInput} onChange={e => setFileNameInput(e.target.value)} disabled={loading} placeholder="e.g. Local Backup" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 transition-colors" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-400 mb-1.5">Select M3U File <span className="text-red-500">*</span></label>
+            <div className="relative border-2 border-dashed border-slate-700 hover:border-blue-500 rounded-lg bg-slate-950 transition-colors group">
+              <input type="file" accept=".m3u,.m3u8,text/plain" onChange={handleFileChange} disabled={loading} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
+              <div className="flex flex-col items-center justify-center py-10 px-4 text-center">
+                <FileText size={32} className={`mb-3 ${selectedFile ? 'text-blue-500' : 'text-slate-500 group-hover:text-blue-400'}`} />
+                <p className="text-sm font-medium text-slate-300">{selectedFile ? selectedFile.name : 'Click or drag file here'}</p>
+                <p className="text-xs text-slate-500 mt-1">Supports .m3u, .m3u8</p>
               </div>
             </div>
-            <button onClick={processXtream} disabled={status.state === 'loading' || !xtreamUrl || !xtreamUser || !xtreamPass || !nameInput} className="bg-blue-600 disabled:bg-blue-600/50 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors mt-2 flex justify-center items-center gap-2">
-              {status.state === 'loading' ? <Loader2 className="animate-spin" size={20} /> : 'Connect to Xtream Server'}
-            </button>
           </div>
-        )}
+          <button type="submit" disabled={loading || !selectedFile} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-colors mt-2">
+            {loading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+            {loading ? 'Uploading...' : 'Upload & Parse File'}
+          </button>
+        </form>
+      )}
 
-        {/* 4. STALKER PORTAL */}
-        {activeTab === 'stalker' && (
-          <div className="flex flex-col gap-5">
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">Portal URL</label>
-              <input type="url" value={stalkerUrl} onChange={(e) => setStalkerUrl(e.target.value)} placeholder="http://domain.com:port/c/" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" disabled={status.state === 'loading'} />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">MAC Address</label>
-              <div className="relative">
-                <input 
-                  type={showStalkerMac ? "text" : "password"} 
-                  value={stalkerMac} 
-                  onChange={(e) => setStalkerMac(e.target.value)} 
-                  placeholder="00:1A:79:XX:YY:ZZ" 
-                  className={`w-full bg-slate-950 border border-slate-700 rounded-lg pl-4 pr-10 py-3 text-slate-100 focus:outline-none focus:border-blue-500 ${showStalkerMac ? 'uppercase tracking-widest font-mono' : ''}`} 
-                  disabled={status.state === 'loading'} 
-                  maxLength={17} 
-                />
-                <button 
-                  type="button" 
-                  onClick={() => setShowStalkerMac(!showStalkerMac)} 
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
-                  disabled={status.state === 'loading'}
-                >
-                  {showStalkerMac ? <EyeOff size={18} /> : <Eye size={18} />}
-                </button>
+      {/* XTREAM & STALKER FORMS */}
+      {(activeTab === 'xtream' || activeTab === 'stalker') && (
+        <form onSubmit={handleApiSubmit} className="space-y-5 bg-slate-900 border border-slate-800 p-5 md:p-6 rounded-xl shadow-sm">
+          <div>
+            <label className="block text-sm font-medium text-slate-400 mb-1.5">Playlist Name</label>
+            <input type="text" value={nameInput} onChange={e => setNameInput(e.target.value)} disabled={loading} placeholder="e.g. My Provider" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-400 mb-1.5">Server URL <span className="text-red-500">*</span></label>
+            <input type="url" required value={serverUrl} onChange={e => setServerUrl(e.target.value)} disabled={loading} placeholder="http://server.com:8080" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" />
+          </div>
+
+          {activeTab === 'xtream' ? (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-400 mb-1.5">Username <span className="text-red-500">*</span></label>
+                <input type="text" required value={username} onChange={e => setUsername(e.target.value)} disabled={loading} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-400 mb-1.5">Password <span className="text-red-500">*</span></label>
+                <input type="password" required value={password} onChange={e => setPassword(e.target.value)} disabled={loading} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" />
               </div>
             </div>
-            <button onClick={processStalker} disabled={status.state === 'loading' || !stalkerUrl || !stalkerMac || !nameInput} className="bg-blue-600 disabled:bg-blue-600/50 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors mt-2 flex justify-center items-center gap-2">
-              {status.state === 'loading' ? <Loader2 className="animate-spin" size={20} /> : 'Authorize MAC & Fetch Data'}
-            </button>
-          </div>
-        )}
+          ) : (
+            <div>
+              <label className="block text-sm font-medium text-slate-400 mb-1.5">MAC Address <span className="text-red-500">*</span></label>
+              <input type="text" required value={macAddress} onChange={e => setMacAddress(e.target.value)} disabled={loading} placeholder="00:1A:79:..." className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500 font-mono" />
+            </div>
+          )}
 
-        {/* UI Feedback System */}
-        {status.state === 'success' && (
-          <div className="mt-4 p-4 bg-green-900/20 border border-green-900/50 rounded-lg flex items-center gap-3 text-green-400 animate-in fade-in">
-            <CheckCircle size={20} className="shrink-0" />
-            <span className="font-medium">{status.message}</span>
-          </div>
-        )}
-        
-        {status.state === 'error' && renderErrorBlock()}
-      </div>
+          <p className="text-xs text-slate-500">Credentials will be securely saved to enable automatic background refreshing.</p>
+
+          <button type="submit" disabled={loading || !serverUrl} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-colors mt-2">
+            {loading ? <Loader2 size={18} className="animate-spin" /> : <LinkIcon size={18} />}
+            {loading ? 'Connecting...' : 'Connect to Server'}
+          </button>
+        </form>
+      )}
     </div>
   );
 }

@@ -26,7 +26,6 @@ function validateUrl(target) {
   }
 }
 
-// Stable ID Generator (Ensures URLs always generate the exact same ID so favorites survive refreshes)
 function generateStableId(sourceId, streamUrl, count) {
   let hash = 5381;
   for (let i = 0; i < streamUrl.length; i++) hash = (hash * 33) ^ streamUrl.charCodeAt(i);
@@ -49,7 +48,6 @@ async function safeFetch(url, options = {}) {
   }
 }
 
-// Check for Duplicates BEFORE creating a new Source
 async function getOrCreateSourceId(env, url) {
   const existing = await env.DB.prepare("SELECT id FROM sources WHERE url = ?").bind(url).first();
   return existing ? existing.id : `src_${crypto.randomUUID()}`;
@@ -58,11 +56,9 @@ async function getOrCreateSourceId(env, url) {
 // ----------------------------------------------------
 // THE TRUE SYNC ENGINE (Adds, Updates, AND Deletes)
 // ----------------------------------------------------
-// Added accountInfo parameter. Notice we DO NOT overwrite playlist_metadata on conflict, protecting user UI edits!
 async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUrl, accountInfo = '{}') {
   if (!channels || channels.length === 0) throw new Error("Parser finished, but found 0 readable channels.");
   
-  // 1. Upsert the Source 
   await env.DB.prepare(`
     INSERT INTO sources (id, name, type, url, channel_count, playlist_metadata, account_info) 
     VALUES (?, ?, ?, ?, 0, '{}', ?) 
@@ -72,14 +68,12 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
       account_info = excluded.account_info
   `).bind(sourceId, name, type, sourceUrl, accountInfo).run();
 
-  // 2. Identify Dead Channels (Sync Deletion)
   const { results: existing } = await env.DB.prepare("SELECT id FROM channels WHERE source_id = ?").bind(sourceId).all();
   const existingIds = new Set(existing.map(r => r.id));
   const newIds = new Set(channels.map(r => r.id));
   
   const toDelete = [...existingIds].filter(id => !newIds.has(id));
 
-  // 3. Purge Dead Channels & Their Zombie Favorites
   for (let i = 0; i < toDelete.length; i += 50) {
     const chunk = toDelete.slice(i, i + 50);
     const placeholders = chunk.map(() => '?').join(',');
@@ -87,7 +81,6 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
     await env.DB.prepare(`DELETE FROM channels WHERE id IN (${placeholders})`).bind(...chunk).run();
   }
 
-  // 4. Batch Insert/Update New Channels (Handles raw_metadata)
   const stmts = channels.map(ch => 
     env.DB.prepare(`
       INSERT INTO channels (id, source_id, name, channel_group, logo_url, stream_url, raw_metadata) 
@@ -117,86 +110,55 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
     }
   }
   
-  // 5. Update Exact Channel Count
   await env.DB.prepare("UPDATE sources SET channel_count = (SELECT COUNT(*) FROM channels WHERE source_id = ?), last_updated = CURRENT_TIMESTAMP WHERE id = ?").bind(sourceId, sourceId).run();
   return successCount;
 }
 
-// ----------------------------------------------------
-// UNIVERSAL M3U IMPORT ENGINE
-// ----------------------------------------------------
 async function processImportUrl(url, sourceId, name) {
   try {
     const response = await safeFetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    
-    if (!response.ok) {
-      return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Direct Link', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
-    }
+    if (!response.ok) return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Direct Link', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
 
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
     const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
     
-    if (contentLength > 50000000) {
-      return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Large Media Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
-    }
-
+    if (contentLength > 50000000) return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Large Media Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
     const isMedia = contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml';
-    const isMpegUrl = contentType.includes('mpegurl');
-
-    if (isMedia && !isMpegUrl) {
-      return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Media Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
-    }
+    if (isMedia && !contentType.includes('mpegurl')) return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Media Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
 
     const text = await response.text();
-
-    if (text.includes('#EXT-X-TARGETDURATION') || text.includes('#EXT-X-STREAM-INF')) {
-      return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'HLS Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
-    }
+    if (text.includes('#EXT-X-TARGETDURATION') || text.includes('#EXT-X-STREAM-INF')) return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'HLS Stream', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
 
     if (text.trimStart().startsWith('#EXTM3U')) {
       const lines = text.split('\n');
       const channels = [];
       let currentChannel = {};
-      let currentMetadata = {}; // EXPANDED SPONGE: Holds metadata across multiple lines
+      let currentMetadata = {};
       const urlCounts = {};
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        
         if (line.startsWith('#EXTINF:')) {
-          currentMetadata = {}; // Reset for a new channel
+          currentMetadata = {};
           const attributes = line.matchAll(/([a-zA-Z0-9-]+)="([^"]+)"/g);
-          for (const match of attributes) {
-            currentMetadata[match[1]] = match[2];
-          }
-          
+          for (const match of attributes) currentMetadata[match[1]] = match[2];
           currentChannel.channel_group = currentMetadata['group-title'] || 'Other';
           currentChannel.logo_url = currentMetadata['tvg-logo'] || null;
-          
           const commaSplit = line.split(',');
           currentChannel.name = commaSplit.length > 1 ? commaSplit[commaSplit.length - 1].trim() : 'Unknown';
-        } 
-        // THE MAGIC SPONGE EXPANSION: Catch VLC and HTTP options on the next lines!
-        else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#EXTHTTP:')) {
+        } else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#EXTHTTP:')) {
            const optMatch = line.match(/#EXT[A-Z]+:([^=]+)=(.*)/);
            if (optMatch) {
-             let key = optMatch[1].trim();
-             let val = optMatch[2].trim();
-             // Strip surrounding quotes if the provider added them
+             let key = optMatch[1].trim(); let val = optMatch[2].trim();
              if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
              currentMetadata[key] = val;
            }
-        } 
-        // THE STREAM URL: Package it all up and save
-        else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
+        } else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
           currentChannel.stream_url = line;
           currentChannel.source_id = sourceId;
           urlCounts[line] = (urlCounts[line] || 0) + 1;
           currentChannel.id = generateStableId(sourceId, line, urlCounts[line]);
-          
-          // Save the fully accumulated metadata JSON (Inline + EXTVLCOPT tags)
           currentChannel.raw_metadata = JSON.stringify(currentMetadata);
-          
           channels.push({ ...currentChannel });
           currentChannel = {};
           currentMetadata = {};
@@ -204,16 +166,14 @@ async function processImportUrl(url, sourceId, name) {
       }
       if (channels.length > 0) return channels;
     }
-
     return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Direct Link', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
-
   } catch (err) {
     return [{ id: generateStableId(sourceId, url, 1), source_id: sourceId, name: name || 'Direct Link', channel_group: 'Direct Streams', logo_url: null, stream_url: url, raw_metadata: '{}' }];
   }
 }
 
 // ----------------------------------------------------
-// BACKGROUND AUTO-REFRESH DAEMON
+// FULLY AUTONOMOUS AUTO-REFRESH DAEMON
 // ----------------------------------------------------
 async function runAutoRefresh(env) {
   try {
@@ -227,17 +187,68 @@ async function runAutoRefresh(env) {
 
     if (hours === 0) return;
 
-    const { results: sources } = await env.DB.prepare(`SELECT * FROM sources WHERE type = 'M3U URL' ORDER BY last_updated ASC LIMIT 5`).all();
+    // Fetch ALL api-based sources
+    const { results: sources } = await env.DB.prepare(`SELECT * FROM sources WHERE type IN ('M3U URL', 'Xtream API', 'Stalker API') ORDER BY last_updated ASC LIMIT 5`).all();
     
     for (const source of sources) {
       const lastUpdated = Date.parse(source.last_updated.endsWith('Z') ? source.last_updated : source.last_updated + 'Z');
       
       if (Date.now() - lastUpdated > hours * 60 * 60 * 1000) {
+        let accountInfo = source.account_info ? JSON.parse(source.account_info) : {};
+        delete accountInfo.sync_error; // Clear old errors
+        
         try {
-          const channels = await processImportUrl(source.url, source.id, source.name);
-          await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url);
+          if (source.type === 'M3U URL') {
+            const channels = await processImportUrl(source.url, source.id, source.name);
+            await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url, JSON.stringify(accountInfo));
+          } 
+          else if (source.type === 'Xtream API') {
+            if (!accountInfo.credentials || !accountInfo.credentials.username) throw new Error("No Xtream credentials saved.");
+            const cleanUrl = accountInfo.credentials.serverUrl;
+            const u = accountInfo.credentials.username;
+            const p = accountInfo.credentials.password;
+            
+            const headers = { "User-Agent": "IPTVSmarters/1.0" };
+            let catMap = {};
+            try {
+              const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_categories`, { headers });
+              const catData = await catRes.json();
+              if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
+            } catch (e) {}
+
+            const response = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_streams`, { headers });
+            const data = await response.json();
+            if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream.");
+            
+            const channels = data.map((ch, idx) => ({ 
+              id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
+              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: JSON.stringify(ch)
+            }));
+            await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, JSON.stringify(accountInfo));
+          } 
+          else if (source.type === 'Stalker API') {
+            if (!accountInfo.credentials || !accountInfo.credentials.macAddress) throw new Error("No Stalker MAC saved.");
+            const cleanUrl = accountInfo.credentials.serverUrl;
+            const headers = { "Cookie": `mac=${accountInfo.credentials.macAddress}`, "User-Agent": "Mozilla/5.0" };
+            const handshakeRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
+            const handshake = await handshakeRes.json();
+            if (handshake?.js?.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
+            
+            const chRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
+            const chData = await chRes.json();
+            if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker response.");
+
+            const channels = chData.js.data.map((ch, idx) => ({ 
+              id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: JSON.stringify(ch)
+            }));
+            await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, JSON.stringify(accountInfo));
+          }
         } catch (e) {
-          console.error(`Background refresh failed for source [${source.id}]:`, e);
+          console.error(`Auto-Refresh failed for [${source.name}]:`, e);
+          accountInfo.sync_error = e.message; // FLAG THE ERROR
+          await env.DB.prepare("UPDATE sources SET account_info = ? WHERE id = ?").bind(JSON.stringify(accountInfo), source.id).run();
         }
       }
     }
@@ -275,9 +286,9 @@ export default {
       }
 
       if (url.pathname === "/api/sources/import-bulk" && request.method === "POST") {
-        const { sourceId, name, type, channels: rawChannels } = await request.json();
+        const { sourceId, name, type, channels: rawChannels, url: sourceUrl } = await request.json();
         
-        const uniqueUrl = `local://${sourceId}`;
+        const uniqueUrl = sourceUrl || `local://${sourceId}`;
         await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, type, url, channel_count, playlist_metadata, account_info) VALUES (?, ?, ?, ?, 0, '{}', '{}')").bind(sourceId, name, type, uniqueUrl).run();
         
         const stmts = rawChannels.map(ch => 
@@ -289,19 +300,14 @@ export default {
         );
         
         for (let i = 0; i < stmts.length; i += 50) { 
-          try {
-            await env.DB.batch(stmts.slice(i, i + 50)); 
-          } catch(e) {
-            throw new Error(`File chunk processing failed: ${e.message}`);
-          }
+          try { await env.DB.batch(stmts.slice(i, i + 50)); } 
+          catch(e) { throw new Error(`File chunk processing failed: ${e.message}`); }
         }
         await env.DB.prepare("UPDATE sources SET channel_count = (SELECT COUNT(*) FROM channels WHERE source_id = ?), last_updated = CURRENT_TIMESTAMP WHERE id = ?").bind(sourceId, sourceId).run();
         return Response.json({ success: true }, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // XTREAM API WITH SPONGE AND ACCOUNT INFO
-      // ==========================================
+      // XTREAM API (Now Saves Credentials)
       if (url.pathname === "/api/sources/import-xtream" && request.method === "POST") {
         const body = await request.json();
         if (!body || !body.serverUrl || !body.username || !body.password) throw new Error("Missing Xtream credentials.");
@@ -317,11 +323,11 @@ export default {
           if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
         } catch (e) {}
 
-        let accountInfo = '{}';
+        let accountInfo = { credentials: { username: body.username, password: body.password, serverUrl: cleanUrl } };
         try {
           const accRes = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}`, { headers });
           const accData = await accRes.json();
-          if (accData.user_info) accountInfo = JSON.stringify(accData.user_info);
+          if (accData.user_info) accountInfo = { ...accountInfo, ...accData.user_info };
         } catch (e) {}
 
         const response = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_streams`, { headers });
@@ -329,22 +335,16 @@ export default {
         if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
         
         const channels = data.map((ch, idx) => ({ 
-          id: `${sourceId}_xtream_${ch.stream_id || idx}`, 
-          source_id: sourceId, 
-          name: ch.name || `Channel ${idx}`, 
-          channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', 
-          logo_url: ch.stream_icon || null, 
-          stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`,
-          raw_metadata: JSON.stringify(ch) // THE API SPONGE
+          id: `${sourceId}_xtream_${ch.stream_id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
+          channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
+          stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, raw_metadata: JSON.stringify(ch) 
         }));
         
-        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Xtream API", cleanUrl, accountInfo);
+        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Xtream API", cleanUrl, JSON.stringify(accountInfo));
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
-      // ==========================================
-      // STALKER API WITH SPONGE AND PROFILE INFO
-      // ==========================================
+      // STALKER API (Now Saves Credentials)
       if (url.pathname === "/api/sources/import-stalker" && request.method === "POST") {
         const body = await request.json();
         if (!body || !body.serverUrl || !body.macAddress) throw new Error("Missing Stalker credentials.");
@@ -357,29 +357,24 @@ export default {
         const handshake = await handshakeRes.json();
         if (handshake?.js?.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
         
-        let accountInfo = '{}';
+        let accountInfo = { credentials: { macAddress: body.macAddress, serverUrl: cleanUrl } };
         try {
           const profRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=stb&action=get_profile`, { headers });
           const profData = await profRes.json();
-          if (profData?.js) accountInfo = JSON.stringify(profData.js);
+          if (profData?.js) accountInfo = { ...accountInfo, ...profData.js };
         } catch (e) {}
 
         const chRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
         const chData = await chRes.json();
-        
         if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker API response format.");
 
         const channels = chData.js.data.map((ch, idx) => ({ 
-          id: `${sourceId}_stalker_${ch.id || idx}`, 
-          source_id: sourceId, 
-          name: ch.name || `Channel ${idx}`, 
-          channel_group: ch.tv_genre?.title || 'Live TV', 
-          logo_url: ch.logo || null, 
-          stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`,
-          raw_metadata: JSON.stringify(ch) // THE API SPONGE
+          id: `${sourceId}_stalker_${ch.id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
+          channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, 
+          stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: JSON.stringify(ch) 
         }));
         
-        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Stalker API", cleanUrl, accountInfo);
+        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Stalker API", cleanUrl, JSON.stringify(accountInfo));
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
@@ -411,65 +406,67 @@ export default {
           const source = await env.DB.prepare("SELECT * FROM sources WHERE id = ?").bind(sourceId).first();
           if (!source) throw new Error("Source not found");
           
+          let accountInfo = source.account_info ? JSON.parse(source.account_info) : {};
+          delete accountInfo.sync_error; // Clear any old errors
+
           let body = {};
           try { body = await request.json(); } catch(e) {}
 
           if (source.type === 'M3U URL') {
             const channels = await processImportUrl(source.url, source.id, source.name);
-            const count = await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url);
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url, JSON.stringify(accountInfo));
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else if (source.type === 'Xtream API') {
-            if (!body.username || !body.password) throw new Error("Xtream credentials required for refresh.");
+            // Allows fallback: Uses manual body inputs if provided, else tries saved credentials
+            const u = body.username || accountInfo.credentials?.username;
+            const p = body.password || accountInfo.credentials?.password;
+            if (!u || !p) throw new Error("Xtream credentials required for refresh.");
             
             const cleanUrl = source.url.replace(/\/$/, '');
             const headers = { "User-Agent": "IPTVSmarters/1.0" };
             
             let catMap = {};
             try {
-              const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_categories`, { headers });
+              const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_categories`, { headers });
               const catData = await catRes.json();
               if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
             } catch (e) {}
 
-            let accountInfo = '{}';
             try {
-              const accRes = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}`, { headers });
+              const accRes = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}`, { headers });
               const accData = await accRes.json();
-              if (accData.user_info) accountInfo = JSON.stringify(accData.user_info);
+              if (accData.user_info) accountInfo = { ...accountInfo, ...accData.user_info };
             } catch (e) {}
 
-            const response = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_streams`, { headers });
+            const response = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_streams`, { headers });
             const data = await response.json();
             if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
             
             const channels = data.map((ch, idx) => ({ 
-              id: `${source.id}_xtream_${ch.stream_id || idx}`, 
-              source_id: source.id, 
-              name: ch.name || `Channel ${idx}`, 
-              channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', 
-              logo_url: ch.stream_icon || null, 
-              stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`,
-              raw_metadata: JSON.stringify(ch) // THE API SPONGE
+              id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
+              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: JSON.stringify(ch) 
             }));
             
-            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, accountInfo);
+            accountInfo.credentials = { username: u, password: p, serverUrl: cleanUrl };
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, JSON.stringify(accountInfo));
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else if (source.type === 'Stalker API') {
-            if (!body.macAddress) throw new Error("MAC Address required for refresh.");
+            const mac = body.macAddress || accountInfo.credentials?.macAddress;
+            if (!mac) throw new Error("MAC Address required for refresh.");
             
             const cleanUrl = source.url.replace(/\/$/, '');
-            const headers = { "Cookie": `mac=${body.macAddress}`, "User-Agent": "Mozilla/5.0" };
+            const headers = { "Cookie": `mac=${mac}`, "User-Agent": "Mozilla/5.0" };
             const handshakeRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
             const handshake = await handshakeRes.json();
             if (handshake?.js?.token) headers["Authorization"] = `Bearer ${handshake.js.token}`;
             
-            let accountInfo = '{}';
             try {
               const profRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=stb&action=get_profile`, { headers });
               const profData = await profRes.json();
-              if (profData?.js) accountInfo = JSON.stringify(profData.js);
+              if (profData?.js) accountInfo = { ...accountInfo, ...profData.js };
             } catch (e) {}
 
             const chRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=itv&action=get_all_channels`, { headers });
@@ -477,16 +474,13 @@ export default {
             if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker response.");
 
             const channels = chData.js.data.map((ch, idx) => ({ 
-              id: `${source.id}_stalker_${ch.id || idx}`, 
-              source_id: source.id, 
-              name: ch.name || `Channel ${idx}`, 
-              channel_group: ch.tv_genre?.title || 'Live TV', 
-              logo_url: ch.logo || null, 
-              stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`,
-              raw_metadata: JSON.stringify(ch) // THE API SPONGE
+              id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, 
+              stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: JSON.stringify(ch) 
             }));
             
-            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, accountInfo);
+            accountInfo.credentials = { macAddress: mac, serverUrl: cleanUrl };
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, JSON.stringify(accountInfo));
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else {
@@ -495,54 +489,41 @@ export default {
         }
       }
 
-      // ==========================================
-      // ADVANCED METADATA OVERRIDES (THE 3 TIERS)
-      // ==========================================
+      // Metadata Overrides & Search/Pagination logic (Kept intact)
       if (url.pathname === "/api/settings/metadata" && request.method === "PUT") {
         const body = await request.json();
         if (body && typeof body.global_metadata !== 'undefined') {
-          await env.DB.prepare("UPDATE settings SET global_metadata = ? WHERE id = 'global'")
-            .bind(body.global_metadata).run();
+          await env.DB.prepare("UPDATE settings SET global_metadata = ? WHERE id = 'global'").bind(body.global_metadata).run();
           return Response.json({ success: true }, { headers: corsHeaders });
         }
-        throw new Error("Invalid payload for global metadata");
+        throw new Error("Invalid payload");
       }
 
       const sourceMetaMatch = url.pathname.match(/^\/api\/sources\/(src_[^\/]+)\/metadata$/);
       if (sourceMetaMatch && request.method === "PUT") {
-        const sourceId = sourceMetaMatch[1];
         const body = await request.json();
         if (body && typeof body.playlist_metadata !== 'undefined') {
-          await env.DB.prepare("UPDATE sources SET playlist_metadata = ? WHERE id = ?")
-            .bind(body.playlist_metadata, sourceId).run();
+          await env.DB.prepare("UPDATE sources SET playlist_metadata = ? WHERE id = ?").bind(body.playlist_metadata, sourceMetaMatch[1]).run();
           return Response.json({ success: true }, { headers: corsHeaders });
         }
-        throw new Error("Invalid payload for playlist metadata");
+        throw new Error("Invalid payload");
       }
 
       const channelMetaMatch = url.pathname.match(/^\/api\/channels\/([^\/]+)\/metadata$/);
       if (channelMetaMatch && request.method === "PUT") {
-        const channelId = channelMetaMatch[1];
         const body = await request.json();
         if (body && typeof body.raw_metadata !== 'undefined') {
-          await env.DB.prepare("UPDATE channels SET raw_metadata = ? WHERE id = ?")
-            .bind(body.raw_metadata, channelId).run();
+          await env.DB.prepare("UPDATE channels SET raw_metadata = ? WHERE id = ?").bind(body.raw_metadata, channelMetaMatch[1]).run();
           return Response.json({ success: true }, { headers: corsHeaders });
         }
-        throw new Error("Invalid payload for channel metadata");
+        throw new Error("Invalid payload");
       }
 
-      // ==========================================
-      // SEARCH & PAGINATION
-      // ==========================================
       if (url.pathname === "/api/categories" && request.method === "GET") {
         const sourceId = url.searchParams.get("sourceId");
         let query = "SELECT channel_group as name, COUNT(*) as count FROM channels";
         let params = [];
-        if (sourceId && sourceId !== "All") {
-          query += " WHERE source_id = ?";
-          params.push(sourceId);
-        }
+        if (sourceId && sourceId !== "All") { query += " WHERE source_id = ?"; params.push(sourceId); }
         query += " GROUP BY channel_group ORDER BY channel_group ASC";
         const { results } = await env.DB.prepare(query).bind(...params).all();
         const total = results.reduce((sum, row) => sum + row.count, 0);
@@ -556,10 +537,8 @@ export default {
         const limit = parseInt(url.searchParams.get("limit") || "100");
         const offset = parseInt(url.searchParams.get("offset") || "0");
 
-        let query = "SELECT * FROM channels";
-        let countQuery = "SELECT COUNT(*) as total FROM channels";
-        let conditions = [];
-        let params = [];
+        let query = "SELECT * FROM channels"; let countQuery = "SELECT COUNT(*) as total FROM channels";
+        let conditions = []; let params = [];
 
         if (sourceId && sourceId !== "All") { conditions.push("source_id = ?"); params.push(sourceId); }
         if (category && category !== "All" && category !== "undefined") { conditions.push("channel_group = ?"); params.push(category); }
@@ -567,8 +546,7 @@ export default {
 
         if (conditions.length > 0) {
           const whereClause = " WHERE " + conditions.join(" AND ");
-          query += whereClause;
-          countQuery += whereClause;
+          query += whereClause; countQuery += whereClause;
         }
 
         query += ` ORDER BY name ASC LIMIT ? OFFSET ?`;
@@ -576,11 +554,7 @@ export default {
         params.push(limit, offset);
         const { results } = await env.DB.prepare(query).bind(...params).all();
 
-        return Response.json({
-          data: results,
-          total: totalResult.total,
-          hasMore: offset + results.length < totalResult.total
-        }, { headers: corsHeaders });
+        return Response.json({ data: results, total: totalResult.total, hasMore: offset + results.length < totalResult.total }, { headers: corsHeaders });
       }
 
       if (url.pathname === "/api/favorites" && request.method === "GET") {
@@ -614,7 +588,6 @@ export default {
         }
       }
 
-      // FRONTEND ROUTING
       if (!url.pathname.startsWith("/api/")) {
         try {
           const assetResponse = await env.ASSETS.fetch(request);
