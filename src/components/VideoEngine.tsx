@@ -68,7 +68,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     setUseProxy(false);
   }, [streamUrl]);
 
-  // Actual offline detection (Triggers ONLY when network interface goes down)
+  // Actual offline detection
   useEffect(() => {
     const handleOffline = () => {
       setErrorUI({
@@ -138,7 +138,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     const handleLeavePip = () => {
-      // Fixes Chrome bug: DO NOT force close the player. Just update the UI state.
       window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
     };
 
@@ -148,7 +147,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       video.play().catch(() => setIsPlaying(false));
     };
     
-    // Detailed Native Error Extraction
     const handleNativeError = () => {
       clearWatchdog();
       setIsBuffering(false);
@@ -185,12 +183,12 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       let activeStreamUrl = streamUrl;
       
       if (useProxy) {
-        const config = { url: streamUrl, userAgent: "IPTVSmarters/1.0" };
+        // USE VLC UA TO AVOID PROVIDER BLOCKLISTS
+        const config = { url: streamUrl, userAgent: "VLC/3.0.0" };
         const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
         activeStreamUrl = `${PROXY_WORKER_URL}?cfg=${encoded}`;
       }
 
-      // MIXED CONTENT HTTP TRAP
       if (window.location.protocol === 'https:' && activeStreamUrl.startsWith('http://')) {
         clearWatchdog();
         setErrorUI({
@@ -311,9 +309,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
           processSubtitles(data.subtitleTracks || []);
         });
 
-        // ==========================================
-        // DETAILED HLS ERROR CAPTURE
-        // ==========================================
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR) {
             clearWatchdog();
@@ -329,14 +324,13 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
             setIsBuffering(false);
 
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-              // Extract the exact HTTP Status Code
               const httpStatus = data.response?.code || 0;
               let title = "Network Error";
               let desc = "Failed to download stream data.";
               
               if (httpStatus === 403 || httpStatus === 401) {
                 title = "Geo-Blocked / 403 Forbidden";
-                desc = "The provider is actively blocking your connection. Use the proxy to bypass this.";
+                desc = "The provider is actively blocking your connection. Use the proxy or play externally to bypass this.";
               } else if (httpStatus === 0) {
                 title = "CORS Block / Dead Link";
                 desc = "The browser blocked this stream (CORS), or the server is completely unreachable.";
@@ -561,7 +555,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     }
   };
 
-  // Fixed PiP Logic for Chrome/Firefox
   const togglePiP = async () => {
     try {
       if (document.pictureInPictureElement) {
@@ -582,7 +575,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       let targetUrl = streamUrl;
 
       if (forceProxy) {
-        const config = { url: streamUrl, userAgent: "IPTVSmarters/1.0" };
+        const config = { url: streamUrl, userAgent: "VLC/3.0.0" };
         const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
         targetUrl = `${PROXY_WORKER_URL}?cfg=${encoded}`;
       }
@@ -639,7 +632,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         />
       )}
 
-      {/* NEW 3-BUTTON ERROR UI */}
       {hasFatalError && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10]/95 backdrop-blur-sm text-center p-6 animate-in fade-in duration-300">
           {errorUI.title === "Connection Lost" ? (
