@@ -454,13 +454,13 @@ export default function Settings() {
                 <textarea 
                   value={editorJson}
                   onChange={(e) => setEditorJson(e.target.value)}
-                  disabled={metaLevel === 'playlist' && !selectedSourceId || metaLevel === 'channel' && !selectedChannel}
+                  disabled={(metaLevel === 'playlist' && !selectedSourceId) || (metaLevel === 'channel' && !selectedChannel)}
                   spellCheck="false"
                   className={`flex-1 min-h-[300px] w-full bg-[#0a0c10] border rounded-lg p-4 font-mono text-sm focus:outline-none transition-colors custom-scrollbar resize-y
                     ${jsonError ? 'border-red-500/50 text-red-200 focus:border-red-500' : 'border-indigo-900/50 text-indigo-100 focus:border-indigo-500'}
                     ${(metaLevel === 'playlist' && !selectedSourceId) || (metaLevel === 'channel' && !selectedChannel) ? 'opacity-50 cursor-not-allowed' : ''}
                   `}
-                  placeholder="{\n  \"User-Agent\": \"VLC/3.0.0\",\n  \"Referer\": \"http://example.com\"\n}"
+                  placeholder={'{\n  "User-Agent": "VLC/3.0.0",\n  "Referer": "http://example.com"\n}'}
                 />
                 
                 {jsonError && <div className="mt-2 text-xs text-red-400 bg-red-950/30 p-2 rounded border border-red-900/50">{jsonError}</div>}
