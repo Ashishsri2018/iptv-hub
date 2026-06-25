@@ -187,7 +187,6 @@ async function runAutoRefresh(env) {
 
     if (hours === 0) return;
 
-    // Fetch ALL api-based sources
     const { results: sources } = await env.DB.prepare(`SELECT * FROM sources WHERE type IN ('M3U URL', 'Xtream API', 'Stalker API') ORDER BY last_updated ASC LIMIT 5`).all();
     
     for (const source of sources) {
@@ -195,7 +194,7 @@ async function runAutoRefresh(env) {
       
       if (Date.now() - lastUpdated > hours * 60 * 60 * 1000) {
         let accountInfo = source.account_info ? JSON.parse(source.account_info) : {};
-        delete accountInfo.sync_error; // Clear old errors
+        delete accountInfo.sync_error;
         
         try {
           if (source.type === 'M3U URL') {
@@ -247,7 +246,7 @@ async function runAutoRefresh(env) {
           }
         } catch (e) {
           console.error(`Auto-Refresh failed for [${source.name}]:`, e);
-          accountInfo.sync_error = e.message; // FLAG THE ERROR
+          accountInfo.sync_error = e.message;
           await env.DB.prepare("UPDATE sources SET account_info = ? WHERE id = ?").bind(JSON.stringify(accountInfo), source.id).run();
         }
       }
@@ -279,7 +278,9 @@ export default {
         const body = await request.json();
         if (!body || !body.playlistUrl) throw new Error("Playlist URL is required.");
         
-        const sourceId = await getOrCreateSourceId(env, body.playlistUrl);
+        // BUG FIX: Accepts frontend explicit ID for duplicate creation
+        const sourceId = body.sourceId || await getOrCreateSourceId(env, body.playlistUrl);
+        
         const channels = await processImportUrl(body.playlistUrl, sourceId, body.name);
         const count = await insertDatabaseBatch(env, channels, sourceId, body.name, body.type, body.playlistUrl);
         return Response.json({ success: true, count }, { headers: corsHeaders });
@@ -307,13 +308,16 @@ export default {
         return Response.json({ success: true }, { headers: corsHeaders });
       }
 
-      // XTREAM API (Now Saves Credentials)
+      // XTREAM API
       if (url.pathname === "/api/sources/import-xtream" && request.method === "POST") {
         const body = await request.json();
         if (!body || !body.serverUrl || !body.username || !body.password) throw new Error("Missing Xtream credentials.");
         
         const cleanUrl = validateUrl(body.serverUrl.replace(/\/$/, ''));
-        const sourceId = await getOrCreateSourceId(env, cleanUrl);
+        
+        // BUG FIX: Accepts frontend explicit ID
+        const sourceId = body.sourceId || await getOrCreateSourceId(env, cleanUrl);
+        
         const headers = { "User-Agent": "IPTVSmarters/1.0" };
         
         let catMap = {};
@@ -344,13 +348,16 @@ export default {
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
-      // STALKER API (Now Saves Credentials)
+      // STALKER API
       if (url.pathname === "/api/sources/import-stalker" && request.method === "POST") {
         const body = await request.json();
         if (!body || !body.serverUrl || !body.macAddress) throw new Error("Missing Stalker credentials.");
 
         const cleanUrl = validateUrl(body.serverUrl.replace(/\/$/, ''));
-        const sourceId = await getOrCreateSourceId(env, cleanUrl);
+        
+        // BUG FIX: Accepts frontend explicit ID
+        const sourceId = body.sourceId || await getOrCreateSourceId(env, cleanUrl);
+        
         const headers = { "Cookie": `mac=${body.macAddress}`, "User-Agent": "Mozilla/5.0" };
         
         const handshakeRes = await safeFetch(`${cleanUrl}/portal/server/load.php?type=stb&action=handshake`, { headers });
@@ -418,7 +425,6 @@ export default {
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else if (source.type === 'Xtream API') {
-            // Allows fallback: Uses manual body inputs if provided, else tries saved credentials
             const u = body.username || accountInfo.credentials?.username;
             const p = body.password || accountInfo.credentials?.password;
             if (!u || !p) throw new Error("Xtream credentials required for refresh.");
@@ -489,7 +495,6 @@ export default {
         }
       }
 
-      // Metadata Overrides & Search/Pagination logic (Kept intact)
       if (url.pathname === "/api/settings/metadata" && request.method === "PUT") {
         const body = await request.json();
         if (body && typeof body.global_metadata !== 'undefined') {

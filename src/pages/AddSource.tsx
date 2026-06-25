@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle, Tv } from 'lucide-react';
+import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle, Tv, Eye, EyeOff, RefreshCw } from 'lucide-react';
 import { API_URL } from '../config';
 
 export default function AddSource() {
@@ -18,14 +18,20 @@ export default function AddSource() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [macAddress, setMacAddress] = useState('');
-
+  
+  // UI States
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<{ type: 'success' | 'error' | null, message: string }>({ type: null, message: '' });
+  
+  // DUPLICATE HANDLER STATE
+  const [duplicateSource, setDuplicateSource] = useState<any>(null);
 
   const resetForm = () => {
     setUrlInput(''); setNameInput('');
     setSelectedFile(null); setFileNameInput('');
     setServerUrl(''); setUsername(''); setPassword(''); setMacAddress('');
+    setShowPassword(false);
   };
 
   const generateStableId = (sourceId: string, streamUrl: string, count: number) => {
@@ -36,7 +42,6 @@ export default function AddSource() {
     return `${sourceId}_${hashStr}_${tail}_${count}`;
   };
 
-  // CLIENT-SIDE SPONGE PARSER (Runs on Phone/Browser)
   const parseM3ULocally = (text: string, sourceId: string) => {
     const lines = text.split('\n');
     const channels = [];
@@ -80,18 +85,36 @@ export default function AddSource() {
     return channels;
   };
 
+  // --- M3U URL DUPLICATE CHECKER & EXECUTER ---
   const handleUrlSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!urlInput) return setStatus({ type: 'error', message: 'URL is required.' });
 
+    try {
+      const res = await fetch(`${API_URL}/api/sources`);
+      if (res.ok) {
+        const existingSources = await res.json();
+        const existing = existingSources.find((s: any) => s.url === urlInput.trim());
+        if (existing) {
+          setDuplicateSource(existing);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("Failed duplicate check", err);
+    }
+
+    executeUrlImport();
+  };
+
+  const executeUrlImport = async (forceSourceId?: string) => {
     setLoading(true);
     setStatus({ type: null, message: 'Testing connection from device...' });
 
     let finalName = nameInput.trim() || 'My Playlist';
-    const tempSourceId = `src_${crypto.randomUUID()}`;
+    const tempSourceId = forceSourceId || `src_${crypto.randomUUID()}`;
 
     try {
-      // 1. ATTEMPT HOME-IP FETCH FIRST
       let clientText = null;
       let clientFetchSuccess = false;
 
@@ -103,18 +126,15 @@ export default function AddSource() {
           setStatus({ type: null, message: 'Device fetch successful. Parsing locally...' });
         }
       } catch (err) {
-        // CORS error or device offline. Silent fail, we fallback to worker.
-        console.log("Client fetch failed (CORS or Network). Falling back to Cloudflare Worker.", err);
+        console.log("Client fetch failed. Falling back to Cloudflare Worker.", err);
       }
 
       if (clientFetchSuccess && clientText && clientText.includes('#EXTM3U')) {
-        // 2. PARSE AND BULK UPLOAD (Home IP Bypass)
         const channels = parseM3ULocally(clientText, tempSourceId);
         if (channels.length === 0) throw new Error("File read successfully, but no valid channels found.");
 
         setStatus({ type: null, message: `Parsed ${channels.length} channels. Uploading to Database...` });
 
-        // Bulk insert in chunks of 5000 to avoid overloading request size
         const CHUNK_SIZE = 5000;
         for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
            const chunk = channels.slice(i, i + CHUNK_SIZE);
@@ -129,13 +149,12 @@ export default function AddSource() {
         setStatus({ type: 'success', message: `Successfully added ${channels.length} channels using Home IP!` });
         resetForm();
       } else {
-        // 3. FALLBACK: USE CLOUDFLARE WORKER
         setStatus({ type: null, message: 'Routing fetch through Cloudflare Server...' });
         
         const res = await fetch(`${API_URL}/api/sources/import`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ playlistUrl: urlInput, name: finalName, type: 'M3U URL' })
+          body: JSON.stringify({ playlistUrl: urlInput, name: finalName, type: 'M3U URL', sourceId: forceSourceId })
         });
         
         const data = await res.json();
@@ -151,6 +170,64 @@ export default function AddSource() {
     }
   };
 
+  // --- API DUPLICATE CHECKER & EXECUTER ---
+  const handleApiSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!serverUrl) return setStatus({ type: 'error', message: 'Server URL required.' });
+
+    try {
+      const res = await fetch(`${API_URL}/api/sources`);
+      if (res.ok) {
+        const existingSources = await res.json();
+        const cleanUrl = serverUrl.replace(/\/$/, '');
+        const existing = existingSources.find((s: any) => s.url === cleanUrl);
+        if (existing) {
+          setDuplicateSource(existing);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("Failed duplicate check", err);
+    }
+
+    executeApiImport();
+  };
+
+  const executeApiImport = async (forceSourceId?: string) => {
+    setLoading(true);
+    setStatus({ type: null, message: 'Connecting to Server API...' });
+
+    let endpoint = activeTab === 'xtream' ? '/api/sources/import-xtream' : '/api/sources/import-stalker';
+    let payload: any = { serverUrl, name: nameInput || `${activeTab.toUpperCase()} Server`, sourceId: forceSourceId };
+    
+    if (activeTab === 'xtream') {
+      if (!username || !password) { setLoading(false); return setStatus({ type: 'error', message: 'Username & Password required.' }); }
+      payload.username = username; payload.password = password;
+    } else {
+      if (!macAddress) { setLoading(false); return setStatus({ type: 'error', message: 'MAC Address required.' }); }
+      payload.macAddress = macAddress;
+    }
+
+    try {
+      const res = await fetch(`${API_URL}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "API Connection failed.");
+      
+      setStatus({ type: 'success', message: `Connected! Imported ${data.count} channels.` });
+      resetForm();
+    } catch (error: any) {
+      setStatus({ type: 'error', message: error.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- LOCAL FILE SUBMIT ---
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setSelectedFile(e.target.files[0]);
@@ -194,43 +271,6 @@ export default function AddSource() {
       resetForm();
     } catch (err: any) {
       setStatus({ type: 'error', message: err.message });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleApiSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!serverUrl) return setStatus({ type: 'error', message: 'Server URL required.' });
-
-    setLoading(true);
-    setStatus({ type: null, message: 'Connecting to Server API...' });
-
-    let endpoint = activeTab === 'xtream' ? '/api/sources/import-xtream' : '/api/sources/import-stalker';
-    let payload: any = { serverUrl, name: nameInput || `${activeTab.toUpperCase()} Server` };
-    
-    if (activeTab === 'xtream') {
-      if (!username || !password) { setLoading(false); return setStatus({ type: 'error', message: 'Username & Password required.' }); }
-      payload.username = username; payload.password = password;
-    } else {
-      if (!macAddress) { setLoading(false); return setStatus({ type: 'error', message: 'MAC Address required.' }); }
-      payload.macAddress = macAddress;
-    }
-
-    try {
-      const res = await fetch(`${API_URL}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      
-      const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || "API Connection failed.");
-      
-      setStatus({ type: 'success', message: `Connected! Imported ${data.count} channels.` });
-      resetForm();
-    } catch (error: any) {
-      setStatus({ type: 'error', message: error.message });
     } finally {
       setLoading(false);
     }
@@ -329,7 +369,24 @@ export default function AddSource() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-400 mb-1.5">Password <span className="text-red-500">*</span></label>
-                <input type="password" required value={password} onChange={e => setPassword(e.target.value)} disabled={loading} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-slate-100 focus:outline-none focus:border-blue-500" />
+                <div className="relative">
+                  <input 
+                    type={showPassword ? "text" : "password"} 
+                    required 
+                    value={password} 
+                    onChange={e => setPassword(e.target.value)} 
+                    disabled={loading} 
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-4 pr-11 py-3 text-slate-100 focus:outline-none focus:border-blue-500" 
+                  />
+                  <button 
+                    type="button" 
+                    onClick={() => setShowPassword(!showPassword)} 
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 transition-colors focus:outline-none"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                  >
+                    {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
@@ -346,6 +403,76 @@ export default function AddSource() {
             {loading ? 'Connecting...' : 'Connect to Server'}
           </button>
         </form>
+      )}
+
+      {/* --- DUPLICATE URL MODAL OVERLAY --- */}
+      {duplicateSource && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full shadow-2xl overflow-hidden">
+            <div className="p-5 md:p-6">
+              <div className="flex items-center gap-3 mb-3">
+                <AlertCircle className="text-yellow-500" size={24} />
+                <h3 className="text-xl font-bold text-slate-100">Playlist Already Exists</h3>
+              </div>
+              <p className="text-slate-300 text-sm mb-6 leading-relaxed">
+                This URL is already saved in your library as "<span className="font-bold text-white">{duplicateSource.name}</span>". What would you like to do?
+              </p>
+              
+              <div className="flex flex-col gap-3">
+                <button
+                  onClick={async () => {
+                    const src = duplicateSource;
+                    setDuplicateSource(null);
+                    setLoading(true);
+                    setStatus({ type: null, message: `Refreshing existing playlist "${src.name}"...` });
+                    try {
+                      let payload = {};
+                      if (activeTab === 'xtream') payload = { username, password };
+                      else if (activeTab === 'stalker') payload = { macAddress };
+                      
+                      const res = await fetch(`${API_URL}/api/sources/${src.id}/refresh`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                      });
+                      const data = await res.json();
+                      if (!res.ok || data.error) throw new Error(data.error || "Refresh failed.");
+                      
+                      setStatus({ type: 'success', message: `Successfully refreshed! Found ${data.count} channels.` });
+                      resetForm();
+                    } catch (error: any) {
+                      setStatus({ type: 'error', message: error.message });
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+                >
+                  <RefreshCw size={18} /> Refresh Existing Data
+                </button>
+                
+                <button
+                  onClick={() => {
+                    setDuplicateSource(null);
+                    const newId = `src_${crypto.randomUUID()}`;
+                    if (activeTab === 'url') executeUrlImport(newId);
+                    else executeApiImport(newId);
+                  }}
+                  className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-medium py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Plus size={18} /> Add as New Playlist
+                </button>
+                
+                <button
+                  onClick={() => setDuplicateSource(null)}
+                  className="w-full bg-transparent hover:bg-slate-800 text-slate-400 hover:text-slate-200 font-medium py-3 rounded-lg transition-colors mt-1"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
