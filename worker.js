@@ -157,32 +157,49 @@ async function processImportUrl(url, sourceId, name) {
       const lines = text.split('\n');
       const channels = [];
       let currentChannel = {};
+      let currentMetadata = {}; // EXPANDED SPONGE: Holds metadata across multiple lines
       const urlCounts = {};
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
+        
         if (line.startsWith('#EXTINF:')) {
-          const metadata = {};
+          currentMetadata = {}; // Reset for a new channel
           const attributes = line.matchAll(/([a-zA-Z0-9-]+)="([^"]+)"/g);
           for (const match of attributes) {
-            metadata[match[1]] = match[2];
+            currentMetadata[match[1]] = match[2];
           }
           
-          currentChannel.raw_metadata = JSON.stringify(metadata);
-          currentChannel.channel_group = metadata['group-title'] || 'Other';
-          currentChannel.logo_url = metadata['tvg-logo'] || null;
+          currentChannel.channel_group = currentMetadata['group-title'] || 'Other';
+          currentChannel.logo_url = currentMetadata['tvg-logo'] || null;
           
           const commaSplit = line.split(',');
           currentChannel.name = commaSplit.length > 1 ? commaSplit[commaSplit.length - 1].trim() : 'Unknown';
-        } else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
+        } 
+        // THE MAGIC SPONGE EXPANSION: Catch VLC and HTTP options on the next lines!
+        else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#EXTHTTP:')) {
+           const optMatch = line.match(/#EXT[A-Z]+:([^=]+)=(.*)/);
+           if (optMatch) {
+             let key = optMatch[1].trim();
+             let val = optMatch[2].trim();
+             // Strip surrounding quotes if the provider added them
+             if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+             currentMetadata[key] = val;
+           }
+        } 
+        // THE STREAM URL: Package it all up and save
+        else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
           currentChannel.stream_url = line;
           currentChannel.source_id = sourceId;
           urlCounts[line] = (urlCounts[line] || 0) + 1;
           currentChannel.id = generateStableId(sourceId, line, urlCounts[line]);
           
-          if (!currentChannel.raw_metadata) currentChannel.raw_metadata = '{}';
+          // Save the fully accumulated metadata JSON (Inline + EXTVLCOPT tags)
+          currentChannel.raw_metadata = JSON.stringify(currentMetadata);
+          
           channels.push({ ...currentChannel });
           currentChannel = {};
+          currentMetadata = {};
         }
       }
       if (channels.length > 0) return channels;
@@ -619,4 +636,3 @@ export default {
     ctx.waitUntil(runAutoRefresh(env));
   }
 };
- 
