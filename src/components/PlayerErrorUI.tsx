@@ -1,5 +1,5 @@
 import { AlertTriangle, ExternalLink, WifiOff, RefreshCw, ShieldAlert } from 'lucide-react';
-import { ErrorState } from '../utils/errorHandler';
+import type { ErrorState } from '../utils/errorHandler';
 
 interface PlayerErrorUIProps {
   errorUI: ErrorState;

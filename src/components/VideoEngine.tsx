@@ -3,7 +3,7 @@ import Hls from 'hls.js';
 import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AudioLines, Subtitles } from 'lucide-react';
 import { useAppStore } from '../store';
 import PlayerErrorUI from './PlayerErrorUI';
-import { getNativeError, getHlsError, ErrorState } from '../utils/errorHandler';
+import { getNativeError, getHlsError, type ErrorState } from '../utils/errorHandler';
 
 interface VideoEngineProps {
   streamUrl: string;
