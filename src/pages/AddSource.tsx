@@ -107,6 +107,7 @@ export default function AddSource() {
            pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
            currentChannel = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
         }
+
         
         const attrRegex = /([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
         let match;
