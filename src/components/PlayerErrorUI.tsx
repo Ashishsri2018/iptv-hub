@@ -97,7 +97,7 @@ export default function PlayerErrorUI({ errorUI, onRetry, onRetryProxy, onPlayEx
         {/* NEW BUTTON: Standard Retry */}
         <button 
           onClick={handleClick(onRetry)}
-          onPointerDown={() => handlePressStart(useProxy ? proxyUrl : nativeUrl, 'Stream URL')}
+          onPointerDown={() => handlePressStart(nativeUrl, 'Stream URL')}
           onPointerUp={handlePressEnd}
           onPointerLeave={handlePressEnd}
           onContextMenu={(e) => e.preventDefault()}
