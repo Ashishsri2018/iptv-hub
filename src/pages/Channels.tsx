@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Tv2, Loader2, Image as ImageIcon, Folder, Star, ExternalLink, AlertCircle, X, Check, Film, Radio } from 'lucide-react';
+import { Search, Tv2, Loader2, Image as ImageIcon, Folder, Star, ExternalLink, AlertCircle, X, Check } from 'lucide-react';
 import { API_URL } from '../config';
 import { useAppStore } from '../store';
 
@@ -83,7 +83,7 @@ export default function Channels() {
   const pressTimer = useRef<number | null>(null);
   const toastTimer = useRef<number | null>(null);
   const isLongPressRef = useRef(false);
-  const fetchControllerRef = useRef<AbortController | null>(null); // NEW: Kills overlapping requests
+  const fetchControllerRef = useRef<AbortController | null>(null);
 
   const engineRefs = useRef({
     offset: 0,
@@ -135,6 +135,7 @@ export default function Channels() {
       })
       .catch(err => handleError("Failed to load playlists", err));
 
+    // Fetch favorites strictly for the UI stars
     fetch(`${API_URL}/api/favorites`)
       .then(res => {
         if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
@@ -146,15 +147,13 @@ export default function Channels() {
       .catch(err => handleError("Failed to load favorites", err));
   }, []);
 
-  // 2. Safely Fetch Categories & Fix the Race Condition
+  // 2. Safely Fetch Categories
   useEffect(() => {
     setSearchQuery('');
     setSubmittedSearch('');
-    setActiveCategory('All'); // Synchronously reset BEFORE fetching to prevent "No Channels" glitch
+    setActiveCategory('All');
 
-    if (activeSourceId === 'FAV') {
-      setCategories([{ name: 'All', count: favorites.size }]);
-    } else if (activeSourceId) {
+    if (activeSourceId) {
       fetch(`${API_URL}/api/categories?sourceId=${activeSourceId}`)
         .then(res => {
           if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
@@ -178,18 +177,16 @@ export default function Channels() {
     engineRefs.current.search = submittedSearch;
   }, [activeSourceId, activeCategory, submittedSearch]);
 
-  // 4. Fetch Channels (With AbortController to fix rapid switching bugs)
+  // 4. Fetch Channels
   const loadMoreChannels = useCallback(async (reset = false) => {
     const engine = engineRefs.current;
     
     if (engine.sourceId === null) return; 
-    
-    // Only lock `isFetching` if we are paginating. If resetting, allow it to kill the previous fetch.
     if (!reset && engine.isFetching) return;
     if (!reset && !engine.hasMore) return;
 
     if (reset) {
-      if (fetchControllerRef.current) fetchControllerRef.current.abort(); // Kill overlapping fetch
+      if (fetchControllerRef.current) fetchControllerRef.current.abort();
       fetchControllerRef.current = new AbortController();
       engine.offset = 0;
     }
@@ -199,42 +196,32 @@ export default function Channels() {
     if (reset) setErrorMessage(null); 
 
     try {
+      const url = new URL('/api/channels', window.location.origin);
+      url.searchParams.append('limit', '100');
+      url.searchParams.append('offset', engine.offset.toString());
+      
+      if (engine.sourceId !== 'All') url.searchParams.append('sourceId', engine.sourceId);
+      if (engine.category !== 'All') url.searchParams.append('category', engine.category);
+      
+      if (engine.search.trim() !== '') {
+        const escapedSearch = engine.search.trim().replace(/[%_]/g, '\\$&');
+        const backendSearchTerm = escapedSearch.replace(/\s+/g, '%');
+        url.searchParams.append('search', backendSearchTerm);
+      }
+
+      const res = await fetch(url.toString(), { signal: fetchControllerRef.current?.signal });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json();
+
       let newChannels = [];
       let more = false;
 
-      // Handle the specialized Favorites tab
-      if (engine.sourceId === 'FAV') {
-        const res = await fetch(`${API_URL}/api/favorites`, { signal: fetchControllerRef.current?.signal });
-        if (!res.ok) throw new Error(`Server returned ${res.status}`);
-        newChannels = await res.json();
-        more = false; // Favorites are currently not paginated in backend
-      } 
-      // Handle Standard Playlists
-      else {
-        const url = new URL('/api/channels', window.location.origin);
-        url.searchParams.append('limit', '100');
-        url.searchParams.append('offset', engine.offset.toString());
-        
-        if (engine.sourceId !== 'All') url.searchParams.append('sourceId', engine.sourceId);
-        if (engine.category !== 'All') url.searchParams.append('category', engine.category);
-        
-        if (engine.search.trim() !== '') {
-          const escapedSearch = engine.search.trim().replace(/[%_]/g, '\\$&');
-          const backendSearchTerm = escapedSearch.replace(/\s+/g, '%');
-          url.searchParams.append('search', backendSearchTerm);
-        }
-
-        const res = await fetch(url.toString(), { signal: fetchControllerRef.current?.signal });
-        if (!res.ok) throw new Error(`Server returned ${res.status}`);
-        const data = await res.json();
-
-        if (Array.isArray(data)) {
-          newChannels = data.slice(engine.offset, engine.offset + 100);
-          more = engine.offset + 100 < data.length;
-        } else {
-          newChannels = data.data;
-          more = data.hasMore;
-        }
+      if (Array.isArray(data)) {
+        newChannels = data.slice(engine.offset, engine.offset + 100);
+        more = engine.offset + 100 < data.length;
+      } else {
+        newChannels = data.data;
+        more = data.hasMore;
       }
 
       setChannels(prev => reset ? newChannels : [...prev, ...newChannels]);
@@ -250,7 +237,6 @@ export default function Channels() {
     }
   }, []);
 
-  // Trigger reset fetch when parameters change
   useEffect(() => {
     setChannels([]); 
     loadMoreChannels(true);
@@ -322,32 +308,9 @@ export default function Channels() {
     } else { window.open(url, '_blank'); }
   };
 
-  const activeSourceName = activeSourceId === 'All' ? 'all playlists' : activeSourceId === 'FAV' ? 'Favorites' : sources.find(s => s.id === activeSourceId)?.name || 'loading...';
+  const activeSourceName = activeSourceId === 'All' ? 'all playlists' : sources.find(s => s.id === activeSourceId)?.name || 'loading...';
   const isSearching = submittedSearch.trim() !== '';
   const sortedSources = [...sources].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-
-  // --- NEW: CATEGORY GROUPING LOGIC (VOD / RADIO / LIVE) ---
-  const isVOD = (name: string) => /vod|movie|film|series|cinema/i.test(name);
-  const isRadio = (name: string) => /radio|audio|music/i.test(name);
-
-  const allCat = categories.find(c => c.name === 'All');
-  const vodCats = categories.filter(c => c.name !== 'All' && isVOD(c.name));
-  const radioCats = categories.filter(c => c.name !== 'All' && isRadio(c.name));
-  const regularCats = categories.filter(c => c.name !== 'All' && !isVOD(c.name) && !isRadio(c.name));
-
-  const CategoryButton = ({ cat, icon }: { cat: Category, icon?: React.ReactNode }) => (
-    <button
-      onClick={() => setActiveCategory(cat.name)}
-      className={`flex items-center justify-between px-3 py-3.5 text-sm transition-colors border-l-2
-        ${activeCategory === cat.name ? 'bg-[#2a303c] border-blue-500 text-blue-400' : 'border-transparent text-slate-300 hover:bg-slate-800'}`}
-    >
-      <div className="flex-1 flex items-center gap-2 overflow-hidden mr-2 text-left">
-        {icon && <span className="shrink-0 opacity-70">{icon}</span>}
-        <div className="flex-1 overflow-hidden"><SmartMarquee text={cat.name} /></div>
-      </div>
-      <span className="text-[10px] sm:text-xs font-mono opacity-60 shrink-0">{cat.count}</span>
-    </button>
-  );
 
   return (
     <div className="h-full flex flex-col max-w-7xl mx-auto py-4 sm:py-6 relative overflow-hidden bg-[#0f1115]">
@@ -408,7 +371,7 @@ export default function Channels() {
         </div>
       )}
 
-      {/* TOP TABS (Playlists + Favorites) */}
+      {/* TOP TABS (Playlists Only) */}
       <div className="px-4 sm:px-6 mb-2 shrink-0">
         <div className="flex overflow-x-auto pb-3 gap-2 hide-scroll border-b border-slate-800/50">
           {sortedSources.length > 1 && (
@@ -421,18 +384,6 @@ export default function Channels() {
             </button>
           )}
           
-          {/* THE NEW FAVORITES TAB */}
-          <button
-            onClick={() => setActiveSourceId('FAV')}
-            className={`whitespace-nowrap px-4 py-1.5 rounded-lg text-sm font-bold flex items-center gap-2 transition-all
-              ${activeSourceId === 'FAV' ? 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/20' : 'bg-transparent text-slate-400 hover:bg-slate-800'}`}
-          >
-            <Star size={16} className={activeSourceId === 'FAV' ? 'fill-black text-black' : 'fill-slate-400 text-slate-400'} /> 
-            Favorites
-          </button>
-
-          <div className="w-px h-6 bg-slate-800 mx-1 self-center shrink-0" />
-
           {sortedSources.map((src) => (
             <button
               key={src.id}
@@ -455,30 +406,22 @@ export default function Channels() {
       {/* MAIN CONTENT AREA */}
       <div className="flex-1 flex overflow-hidden w-full relative">
         
-        {/* ADVANCED SMART SIDEBAR (VOD / Radio / Live) */}
+        {/* CLEAN SIDEBAR (Categories Only) */}
         <div className="w-[38%] sm:w-56 flex flex-col border-r border-slate-800/50 bg-[#12141a] overflow-y-auto hide-scroll pb-24">
-          {allCat && <CategoryButton cat={allCat} icon={<Tv2 size={16} />} />}
-
-          {vodCats.length > 0 && (
-            <>
-              <div className="px-3 py-2 mt-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider bg-[#0f1115]">Movies & Series</div>
-              {vodCats.map(cat => <CategoryButton key={cat.name} cat={cat} icon={<Film size={16}/>} />)}
-            </>
-          )}
-
-          {radioCats.length > 0 && (
-            <>
-              <div className="px-3 py-2 mt-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider bg-[#0f1115]">Radio & Audio</div>
-              {radioCats.map(cat => <CategoryButton key={cat.name} cat={cat} icon={<Radio size={16}/>} />)}
-            </>
-          )}
-
-          {regularCats.length > 0 && (
-            <>
-              <div className="px-3 py-2 mt-2 text-[10px] font-bold text-slate-500 uppercase tracking-wider bg-[#0f1115]">Live TV</div>
-              {regularCats.map(cat => <CategoryButton key={cat.name} cat={cat} />)}
-            </>
-          )}
+          {categories.map((cat) => (
+            <button
+              key={cat.name}
+              onClick={() => setActiveCategory(cat.name)}
+              className={`flex items-center justify-between px-3 py-3.5 text-sm transition-colors border-l-2
+                ${activeCategory === cat.name ? 'bg-[#2a303c] border-blue-500 text-blue-400' : 'border-transparent text-slate-300 hover:bg-slate-800'}`}
+            >
+              <div className="flex-1 flex items-center gap-2 overflow-hidden mr-2 text-left">
+                {cat.name === 'All' && <span className="shrink-0 opacity-70"><Tv2 size={16} /></span>}
+                <div className="flex-1 overflow-hidden"><SmartMarquee text={cat.name} /></div>
+              </div>
+              <span className="text-[10px] sm:text-xs font-mono opacity-60 shrink-0">{cat.count}</span>
+            </button>
+          ))}
         </div>
 
         {/* CHANNEL LIST */}

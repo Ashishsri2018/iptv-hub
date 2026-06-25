@@ -42,27 +42,27 @@ export default function AddSource() {
     return `${sourceId}_${hashStr}_${tail}_${count}`;
   };
 
-  // --- ADVANCED M3U+ PARSER IMPROVEMENTS ---
   const cleanChannelName = (name: string) => {
     return name.replace(/[\[\]\(\)\{\}]/g, ' ').replace(/\s+/g, ' ').replace(/^\s*-\s*|\s*-\s*$/g, '').trim().slice(0, 120);
   };
 
-  const detectContentType = (streamUrl: string, metadata: any) => {
+  // STRICT FIREWALL: Looks ONLY at the provider's URL API path (No extension checking!)
+  const isVodOrRadio = (streamUrl: string) => {
     const lowerUrl = streamUrl.toLowerCase();
-    const lowerName = (metadata.name || metadata['tvg-name'] || '').toLowerCase();
-    const group = (metadata['group-title'] || '').toLowerCase();
-
-    if (lowerUrl.includes('.mp3') || lowerUrl.includes('.aac') || lowerUrl.includes('audio') || 
-        lowerName.includes('radio') || group.includes('radio') || metadata.radio === 'true') return 'Radio';
-    if (lowerUrl.includes('/vod/') || lowerUrl.includes('movie') || lowerUrl.includes('series') || 
-        lowerName.includes('vod') || group.includes('vod') || group.includes('film') || group.includes('series')) return 'VOD';
-    return null;
+    
+    if (lowerUrl.includes('/movie/') || lowerUrl.includes('/series/') || lowerUrl.includes('/vod/') || lowerUrl.includes('/radio/')) {
+      return true;
+    }
+    return false;
   };
 
   const pushChannelLocally = (channels: any[], current: any, sourceId: string, urlCounts: Map<string, number>) => {
     if (!current.stream_url) return;
-    const contentType = detectContentType(current.stream_url, current.raw_metadata);
-    if (contentType) current.channel_group = contentType;
+    
+    // URL-Only Firewall: Drop VOD/Movies/Radio instantly
+    if (isVodOrRadio(current.stream_url)) {
+      return; 
+    }
 
     const count = (urlCounts.get(current.stream_url) || 0) + 1;
     urlCounts.set(current.stream_url, count);
@@ -74,7 +74,7 @@ export default function AddSource() {
       channel_group: current.channel_group || 'Other',
       logo_url: current.logo_url, 
       stream_url: current.stream_url,
-      raw_metadata: JSON.stringify(current.raw_metadata)
+      raw_metadata: JSON.stringify(current.raw_metadata) 
     });
   };
 
