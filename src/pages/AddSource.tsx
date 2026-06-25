@@ -42,46 +42,114 @@ export default function AddSource() {
     return `${sourceId}_${hashStr}_${tail}_${count}`;
   };
 
-  const parseM3ULocally = (text: string, sourceId: string) => {
-    const lines = text.split('\n');
-    const channels = [];
-    let currentChannel: any = {};
-    let currentMetadata: any = {};
-    const urlCounts: Record<string, number> = {};
+  // --- ADVANCED M3U+ PARSER IMPROVEMENTS ---
+  const cleanChannelName = (name: string) => {
+    return name.replace(/[\[\]\(\)\{\}]/g, ' ').replace(/\s+/g, ' ').replace(/^\s*-\s*|\s*-\s*$/g, '').trim().slice(0, 120);
+  };
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      
+  const detectContentType = (streamUrl: string, metadata: any) => {
+    const lowerUrl = streamUrl.toLowerCase();
+    const lowerName = (metadata.name || metadata['tvg-name'] || '').toLowerCase();
+    const group = (metadata['group-title'] || '').toLowerCase();
+
+    if (lowerUrl.includes('.mp3') || lowerUrl.includes('.aac') || lowerUrl.includes('audio') || 
+        lowerName.includes('radio') || group.includes('radio') || metadata.radio === 'true') return 'Radio';
+    if (lowerUrl.includes('/vod/') || lowerUrl.includes('movie') || lowerUrl.includes('series') || 
+        lowerName.includes('vod') || group.includes('vod') || group.includes('film') || group.includes('series')) return 'VOD';
+    return null;
+  };
+
+  const pushChannelLocally = (channels: any[], current: any, sourceId: string, urlCounts: Map<string, number>) => {
+    if (!current.stream_url) return;
+    const contentType = detectContentType(current.stream_url, current.raw_metadata);
+    if (contentType) current.channel_group = contentType;
+
+    const count = (urlCounts.get(current.stream_url) || 0) + 1;
+    urlCounts.set(current.stream_url, count);
+
+    channels.push({
+      id: generateStableId(sourceId, current.stream_url, count),
+      source_id: sourceId, 
+      name: current.name || 'Unknown',
+      channel_group: current.channel_group || 'Other',
+      logo_url: current.logo_url, 
+      stream_url: current.stream_url,
+      raw_metadata: JSON.stringify(current.raw_metadata)
+    });
+  };
+
+  // CLIENT-SIDE ADVANCED PARSER (Runs on Phone/Browser)
+  const parseM3ULocally = (text: string, sourceId: string) => {
+    const lines = text.split(/\r?\n/);
+    const channels: any[] = [];
+    const urlCounts = new Map<string, number>();
+    
+    let currentChannel: any = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
+    let pendingGroup: string | null = null;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#EXTM3U')) continue;
+
+      if (line.startsWith('#EXTGRP:')) { 
+        pendingGroup = line.substring(8).trim(); 
+        continue; 
+      }
+
       if (line.startsWith('#EXTINF:')) {
-        currentMetadata = {};
-        const attributes = line.matchAll(/([a-zA-Z0-9-]+)="([^"]+)"/g);
-        for (const match of attributes) currentMetadata[match[1]] = match[2];
+        if (currentChannel.stream_url) {
+           pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
+           currentChannel = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
+        }
         
-        currentChannel.channel_group = currentMetadata['group-title'] || 'Other';
-        currentChannel.logo_url = currentMetadata['tvg-logo'] || null;
-        
-        const commaSplit = line.split(',');
-        currentChannel.name = commaSplit.length > 1 ? commaSplit[commaSplit.length - 1].trim() : 'Unknown';
+        const attrRegex = /([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
+        let match;
+        while ((match = attrRegex.exec(line)) !== null) {
+          const key = match[1].toLowerCase();
+          const value = (match[2] || match[3] || match[4] || '').trim();
+          currentChannel.raw_metadata[key] = value;
+
+          if (key === 'group-title') currentChannel.channel_group = value;
+          if (key === 'tvg-logo' || key === 'logo') currentChannel.logo_url = value;
+          if (key === 'tvg-name' || key === 'tvg-id' || key === 'name') currentChannel.name = value;
+          if (key === 'catchup' || key === 'timeshift') currentChannel.raw_metadata.catchup = value;
+        }
+
+        const commaIndex = line.lastIndexOf(',');
+        if (commaIndex !== -1) {
+          let namePart = line.substring(commaIndex + 1).trim();
+          if (namePart && namePart !== '-1' && namePart.length > 1) {
+            currentChannel.name = cleanChannelName(namePart);
+          }
+        }
+
+        if (pendingGroup) { 
+          currentChannel.channel_group = pendingGroup; 
+          pendingGroup = null; 
+        }
       } 
-      else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#EXTHTTP:')) {
-         const optMatch = line.match(/#EXT[A-Z]+:([^=]+)=(.*)/);
-         if (optMatch) {
-           let key = optMatch[1].trim(); let val = optMatch[2].trim();
-           if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-           currentMetadata[key] = val;
-         }
+      else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#KODIPROP:') || line.startsWith('#EXTHTTP:')) {
+        const match = line.match(/#(?:EXTVLCOPT|KODIPROP|EXTHTTP):([^=]+)=(.*)/i);
+        if (match) {
+          let key = match[1].trim(); let val = match[2].trim();
+          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+          currentChannel.raw_metadata[key] = val;
+        }
       } 
-      else if (line.match(/^(http|https|rtmp|udp|acestream):\/\//i)) {
-        currentChannel.stream_url = line;
-        urlCounts[line] = (urlCounts[line] || 0) + 1;
-        currentChannel.id = generateStableId(sourceId, line, urlCounts[line]);
-        currentChannel.raw_metadata = JSON.stringify(currentMetadata);
-        
-        channels.push({ ...currentChannel });
-        currentChannel = {};
-        currentMetadata = {};
+      else if (/^(http|https|rtmp|udp|acestream|rtsp):\/\//i.test(line)) {
+        currentChannel.stream_url = line.trim();
+        if (pendingGroup) { 
+          currentChannel.channel_group = pendingGroup; 
+          pendingGroup = null; 
+        }
+        pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
+        currentChannel = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
       }
     }
+    
+    // Push the final channel if exists
+    if (currentChannel.stream_url) pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
+    
     return channels;
   };
 
@@ -250,6 +318,7 @@ export default function AddSource() {
       
       const sourceId = `src_local_${crypto.randomUUID()}`;
       const finalName = fileNameInput.trim() || selectedFile.name;
+      
       const channels = parseM3ULocally(text, sourceId);
       
       if (channels.length === 0) throw new Error("No readable channels found in file.");
