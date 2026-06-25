@@ -17,8 +17,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
 
-  // THE USER'S "MEMORY" FIX: Tracks if the user actually wants the video playing
   const intendedPlayState = useRef(true);
+  const lastPauseTimeRef = useRef(0); // NEW: Tracks exactly when the video paused
 
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -70,7 +70,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   useEffect(() => {
     setRetryCount(0);
     setUseProxy(false);
-    intendedPlayState.current = true; // Reset memory on new channel
+    intendedPlayState.current = true;
   }, [streamUrl]);
 
   useEffect(() => {
@@ -123,28 +123,55 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     }, 15000);
 
     const handleNativePlay = () => setIsPlaying(true);
-    const handleNativePause = () => setIsPlaying(false);
+    
+    const handleNativePause = () => {
+      setIsPlaying(false);
+      lastPauseTimeRef.current = Date.now(); // Log the exact millisecond a pause happened
+    };
+    
     const handleNativeWaiting = () => setIsBuffering(true);
     const handleNativePlaying = () => {
       clearWatchdog();
       setIsBuffering(false);
     };
     
-    // MEMORY FIX IMPLEMENTATION: Checks the RAM intendedPlayState
     const handleVisibilityChange = () => {
-      if (!document.hidden && videoRef.current && intendedPlayState.current) {
-         videoRef.current.play().catch(() => {});
+      if (document.hidden) {
+        if (!document.pictureInPictureElement && videoRef.current) {
+           intendedPlayState.current = false;
+           videoRef.current.pause();
+        }
+      } else {
+        if (videoRef.current && intendedPlayState.current) {
+           videoRef.current.play().catch(() => {});
+        }
       }
     };
 
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
+    
+    // THE ULTIMATE PIP EXIT HANDLER
     const handleLeavePip = () => {
       window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
+      
       setTimeout(() => {
-        if (videoRef.current && videoRef.current.paused && intendedPlayState.current) {
+        const video = videoRef.current;
+        if (!video) return;
+
+        // Calculate if a 'pause' event happened within the last 300ms
+        const timeSincePause = Date.now() - lastPauseTimeRef.current;
+        const clickedXInChrome = timeSincePause < 300; 
+
+        // If it was X in Chrome (instant pause) OR X in Firefox (app is hidden in background)
+        if (clickedXInChrome || document.hidden) {
+           video.pause(); // Kills Firefox ghost audio instantly
+           intendedPlayState.current = false;
            window.dispatchEvent(new CustomEvent('force-close-player'));
+        } else {
+           // App is visible and didn't instantly pause. It's a clean Restore!
+           if (intendedPlayState.current) video.play().catch(() => {});
         }
-      }, 300);
+      }, 150);
     };
 
     const handleNativeMeta = () => {
@@ -380,7 +407,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     } else startControlHideTimer();
   };
 
-  // MEMORY FIX: Manual pauses update the memory
   const togglePlay = () => {
     if (hasFatalError || !videoRef.current) return;
     if (videoRef.current.paused) {
