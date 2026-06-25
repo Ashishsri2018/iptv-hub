@@ -45,6 +45,10 @@ export default function PlayerErrorUI({ errorUI, onRetryProxy, onPlayExternalPro
     action();
   };
 
+  const openInNewTab = () => {
+    window.open(nativeUrl, '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10]/95 backdrop-blur-sm text-center p-6 animate-in fade-in duration-300">
       
@@ -74,6 +78,21 @@ export default function PlayerErrorUI({ errorUI, onRetryProxy, onPlayExternalPro
       </div>
       
       <div className="flex flex-col gap-3 w-full max-w-sm">
+        
+        {/* CONDITIONAL BUTTON: Only shows for Mixed Content errors */}
+        {errorUI.title.includes("Mixed Content") && (
+          <button 
+            onClick={handleClick(openInNewTab)}
+            onPointerDown={() => handlePressStart(nativeUrl, 'Original URL')}
+            onPointerUp={handlePressEnd}
+            onPointerLeave={handlePressEnd}
+            onContextMenu={(e) => e.preventDefault()}
+            className="px-5 py-3 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-teal-900/20 transition-all select-none touch-none"
+          >
+            <ExternalLink size={18} /> Open in New Tab
+          </button>
+        )}
+
         <button 
           onClick={handleClick(onRetryProxy)}
           onPointerDown={() => handlePressStart(proxyUrl, 'Proxied URL')}
