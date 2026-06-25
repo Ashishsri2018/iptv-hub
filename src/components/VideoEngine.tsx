@@ -344,6 +344,15 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     activeMenuRef.current = nextMenu;
   };
 
+  // STANDARD RETRY: Retries without changing the proxy state
+  const handleRetryNormal = () => {
+    setHasFatalError(false);
+    setErrorUI({ title: '', desc: '', raw: '' });
+    setIsBuffering(true);
+    setRetryCount(prev => prev + 1);
+  };
+
+  // PROXY RETRY: Forces the proxy to trigger
   const handleRetryProxy = () => {
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
@@ -352,7 +361,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     setRetryCount(prev => prev + 1);
   };
 
-  // FIX: Simplified changeQuality. Hls.js automatically handles -1 without forcing resets.
   const changeQuality = (levelIndex: number) => {
     if (hlsRef.current) {
       hlsRef.current.currentLevel = levelIndex; 
@@ -535,6 +543,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       {hasFatalError && (
         <PlayerErrorUI 
           errorUI={errorUI}
+          onRetry={handleRetryNormal}       // Passes the new standard retry function
           onRetryProxy={handleRetryProxy}
           onPlayExternalProxy={() => launchExternalPlayer(true)}
           onPlayExternalNative={() => launchExternalPlayer(false)}

@@ -4,14 +4,15 @@ import type { ErrorState } from '../utils/errorHandler';
 
 interface PlayerErrorUIProps {
   errorUI: ErrorState;
+  onRetry: () => void;        // Added standard Retry prop
   onRetryProxy: () => void;
   onPlayExternalProxy: () => void;
   onPlayExternalNative: () => void;
-  proxyUrl: string;   // Defines the proxy URL prop
-  nativeUrl: string;  // Defines the raw URL prop
+  proxyUrl: string;
+  nativeUrl: string;
 }
 
-export default function PlayerErrorUI({ errorUI, onRetryProxy, onPlayExternalProxy, onPlayExternalNative, proxyUrl, nativeUrl }: PlayerErrorUIProps) {
+export default function PlayerErrorUI({ errorUI, onRetry, onRetryProxy, onPlayExternalProxy, onPlayExternalNative, proxyUrl, nativeUrl }: PlayerErrorUIProps) {
   const [copiedFeedback, setCopiedFeedback] = useState<string | null>(null);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLongPress = useRef(false);
@@ -93,6 +94,18 @@ export default function PlayerErrorUI({ errorUI, onRetryProxy, onPlayExternalPro
           </button>
         )}
 
+        {/* NEW BUTTON: Standard Retry */}
+        <button 
+          onClick={handleClick(onRetry)}
+          onPointerDown={() => handlePressStart(useProxy ? proxyUrl : nativeUrl, 'Stream URL')}
+          onPointerUp={handlePressEnd}
+          onPointerLeave={handlePressEnd}
+          onContextMenu={(e) => e.preventDefault()}
+          className="px-5 py-3 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20 transition-all select-none touch-none"
+        >
+          <RefreshCw size={18} /> Retry Connection
+        </button>
+
         <button 
           onClick={handleClick(onRetryProxy)}
           onPointerDown={() => handlePressStart(proxyUrl, 'Proxied URL')}
@@ -103,6 +116,7 @@ export default function PlayerErrorUI({ errorUI, onRetryProxy, onPlayExternalPro
         >
           <RefreshCw size={18} /> Retry with Proxy
         </button>
+
         <button 
           onClick={handleClick(onPlayExternalProxy)}
           onPointerDown={() => handlePressStart(proxyUrl, 'Proxied URL')}
@@ -113,6 +127,7 @@ export default function PlayerErrorUI({ errorUI, onRetryProxy, onPlayExternalPro
         >
           <ExternalLink size={18} /> Play External (with Proxy)
         </button>
+
         <button 
           onClick={handleClick(onPlayExternalNative)}
           onPointerDown={() => handlePressStart(nativeUrl, 'Original URL')}
