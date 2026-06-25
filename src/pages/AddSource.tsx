@@ -107,7 +107,6 @@ export default function AddSource() {
            pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
            currentChannel = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
         }
-
         
         const attrRegex = /([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
         let match;
@@ -221,26 +220,34 @@ export default function AddSource() {
            throw new Error(`Device connection rejected with status: ${response.status}`);
         }
         
-        // RAM PROTECTION: Check Content-Type to avoid downloading 5GB movies
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        const isMpegUrl = contentType.includes('mpegurl') || contentType.includes('m3u') || urlInput.includes('.m3u');
-        
         let channels = [];
 
-        // If it's an M3U or text, download and parse it
-        if (isMpegUrl || contentType.includes('text') || contentType === '') {
-           const clientText = await response.text();
-           
-           if (clientText.includes('#EXTM3U')) {
-               setStatus({ type: null, message: 'Connected successfully! Parsing locally...' });
-               channels = parseM3ULocally(clientText, tempSourceId);
-           } else {
-               // 200 OK but NO M3U Header = Add as Single Channel
-               channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
-           }
+        // EXPLICIT MEDIA BYPASS
+        if (contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') {
+            channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
         } else {
-           // 200 OK and explicitly video/audio = Add as Single Channel WITHOUT downloading text into RAM
-           channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
+            // Read text safely
+            const clientText = await response.text();
+            const lowerText = clientText.trimStart().toLowerCase();
+
+            // A. HTML Soft 404 Blocker
+            if (lowerText.startsWith('<html') || lowerText.startsWith('<!doctype')) {
+                throw new Error("The link returned an HTML error webpage (Soft 404), not a video stream.");
+            } 
+            // B. HLS Stream
+            else if (clientText.includes('#EXT-X-TARGETDURATION') || clientText.includes('#EXT-X-STREAM-INF')) {
+                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
+            } 
+            // C. Actual Playlist
+            else if (clientText.trimStart().startsWith('#EXTM3U')) {
+                setStatus({ type: null, message: 'Connected successfully! Parsing locally...' });
+                channels = parseM3ULocally(clientText, tempSourceId);
+            } 
+            // D. Catch-all (No extension, unrecognised format, or generic text -> Direct Stream)
+            else {
+                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
+            }
         }
 
         if (channels.length === 0) throw new Error("No live channels found (VODs were skipped).");
