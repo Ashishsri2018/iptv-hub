@@ -109,7 +109,7 @@ export default function AddSource() {
         let channels: any[] = [];
         let playlistMetadata = {};
 
-        // EXPLICIT MEDIA BYPASS (FIXED TS ERROR HERE)
+        // EXPLICIT MEDIA BYPASS
         if ((contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') && !isM3uMime) {
             channels = [{ id: generateStableId(tempSourceId, urlInput, finalName, 'Direct Streams'), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
         } else {
@@ -121,18 +121,18 @@ export default function AddSource() {
             if (lowerText.startsWith('<html') || lowerText.startsWith('<!doctype')) {
                 throw new Error("The link returned an HTML error webpage (Soft 404), not a video stream.");
             } 
-            // B. HLS Stream (FIXED TS ERROR HERE)
+            // B. HLS Stream
             else if (clientText.includes('#EXT-X-TARGETDURATION') || clientText.includes('#EXT-X-STREAM-INF')) {
                 channels = [{ id: generateStableId(tempSourceId, urlInput, finalName, 'Direct Streams'), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
             } 
-            // C. Actual Playlist - USE SHARED PARSER
+            // C. Actual Playlist - KEEP VODS FOR M3U URL
             else if (clientText.trimStart().startsWith('#EXTM3U')) {
                 setStatus({ type: null, message: 'Connected successfully! Parsing locally...' });
-                const parsed = parseM3UString(clientText, tempSourceId, finalName);
+                const parsed = parseM3UString(clientText, tempSourceId, { fallbackName: finalName, keepVods: true });
                 channels = parsed.channels;
                 playlistMetadata = parsed.playlistMetadata;
             } 
-            // D. STRICT CATCH-ALL (FIXED TS ERROR HERE)
+            // D. STRICT CATCH-ALL
             else if (contentType.includes('octet-stream') || contentType === '') {
                 channels = [{ id: generateStableId(tempSourceId, urlInput, finalName, 'Direct Streams'), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
             }
@@ -267,8 +267,8 @@ export default function AddSource() {
       const sourceId = `src_local_${crypto.randomUUID()}`;
       const finalName = fileNameInput.trim() || selectedFile.name;
       
-      // USE SHARED PARSER
-      const parsed = parseM3UString(text, sourceId, finalName);
+      // KEEP VODS FOR M3U FILE
+      const parsed = parseM3UString(text, sourceId, { fallbackName: finalName, keepVods: true });
       const channels = parsed.channels;
       const playlistMetadata = parsed.playlistMetadata;
       

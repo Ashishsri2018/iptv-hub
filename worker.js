@@ -1,4 +1,4 @@
-import { generateStableId, parseM3UString } from './src/shared/m3uParser';
+import { generateStableId, parseM3UString, isVod } from './src/shared/m3uParser';
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*", 
@@ -154,7 +154,8 @@ async function processImportUrl(url, sourceId, name) {
 
        if (firstChunkText.trimStart().startsWith('#EXTM3U')) {
            const fullText = await response.text();
-           return parseM3UString(fullText, sourceId, name);
+           // ALLOW 100% IMPORT FOR M3U
+           return parseM3UString(fullText, sourceId, { fallbackName: name, keepVods: true });
        }
     }
 
@@ -169,7 +170,6 @@ async function processImportUrl(url, sourceId, name) {
   }
 }
 
-// FIXED: Now passes displayName and 'Direct Streams' to generateStableId
 function createDirectChannel(sourceId, streamUrl, displayName) {
   return [{
     id: generateStableId(sourceId, streamUrl, displayName || 'Unknown', 'Direct Streams'), 
@@ -239,13 +239,15 @@ async function runAutoRefresh(env) {
             const data = await response.json();
             if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream.");
             
-            const channels = data.map((ch, idx) => ({ 
-              id: generateStableId(source.id, `${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
-              source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
-              logo_url: ch.stream_icon || null, 
-              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch
-            }));
+            const channels = data
+              .filter(ch => !isVod(`${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch))
+              .map((ch, idx) => ({ 
+                id: generateStableId(source.id, `${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
+                source_id: source.id, name: ch.name || `Channel ${idx}`, 
+                channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
+                logo_url: ch.stream_icon || null, 
+                stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch
+              }));
             await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, '{}', JSON.stringify(accountInfo));
           } 
           else if (source.type === 'Stalker API') {
@@ -260,12 +262,14 @@ async function runAutoRefresh(env) {
             const chData = await chRes.json();
             if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker response.");
 
-            const channels = chData.js.data.map((ch, idx) => ({ 
-              id: generateStableId(source.id, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
-              source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
-              logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch
-            }));
+            const channels = chData.js.data
+              .filter(ch => !isVod(ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch))
+              .map((ch, idx) => ({ 
+                id: generateStableId(source.id, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
+                source_id: source.id, name: ch.name || `Channel ${idx}`, 
+                channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
+                logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch
+              }));
             await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, '{}', JSON.stringify(accountInfo));
           }
         } catch (e) {
@@ -354,13 +358,15 @@ export default {
         const data = await response.json();
         if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
         
-        const channels = data.map((ch, idx) => ({ 
-          id: generateStableId(sourceId, `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
-          source_id: sourceId, name: ch.name || `Channel ${idx}`, 
-          channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
-          logo_url: ch.stream_icon || null, 
-          stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, raw_metadata: ch 
-        }));
+        const channels = data
+          .filter(ch => !isVod(`${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, ch))
+          .map((ch, idx) => ({ 
+            id: generateStableId(sourceId, `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
+            source_id: sourceId, name: ch.name || `Channel ${idx}`, 
+            channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
+            logo_url: ch.stream_icon || null, 
+            stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, raw_metadata: ch 
+          }));
         
         const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Xtream API", cleanUrl, '{}', JSON.stringify(accountInfo));
         return Response.json({ success: true, count }, { headers: corsHeaders });
@@ -389,13 +395,15 @@ export default {
         const chData = await chRes.json();
         if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker API response format.");
 
-        const channels = chData.js.data.map((ch, idx) => ({ 
-          id: generateStableId(sourceId, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
-          source_id: sourceId, name: ch.name || `Channel ${idx}`, 
-          channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
-          logo_url: ch.logo || null, 
-          stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
-        }));
+        const channels = chData.js.data
+          .filter(ch => !isVod(ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch))
+          .map((ch, idx) => ({ 
+            id: generateStableId(sourceId, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
+            source_id: sourceId, name: ch.name || `Channel ${idx}`, 
+            channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
+            logo_url: ch.logo || null, 
+            stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
+          }));
         
         const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Stalker API", cleanUrl, '{}', JSON.stringify(accountInfo));
         return Response.json({ success: true, count }, { headers: corsHeaders });
@@ -456,13 +464,15 @@ export default {
             const data = await response.json();
             if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
             
-            const channels = data.map((ch, idx) => ({ 
-              id: generateStableId(source.id, `${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
-              source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
-              logo_url: ch.stream_icon || null, 
-              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch 
-            }));
+            const channels = data
+              .filter(ch => !isVod(`${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch))
+              .map((ch, idx) => ({ 
+                id: generateStableId(source.id, `${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
+                source_id: source.id, name: ch.name || `Channel ${idx}`, 
+                channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
+                logo_url: ch.stream_icon || null, 
+                stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch 
+              }));
             
             accountInfo.credentials = { username: u, password: p, serverUrl: cleanUrl };
             const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, '{}', JSON.stringify(accountInfo));
@@ -488,13 +498,15 @@ export default {
             const chData = await chRes.json();
             if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker response.");
 
-            const channels = chData.js.data.map((ch, idx) => ({ 
-              id: generateStableId(source.id, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
-              source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
-              logo_url: ch.logo || null, 
-              stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
-            }));
+            const channels = chData.js.data
+              .filter(ch => !isVod(ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch))
+              .map((ch, idx) => ({ 
+                id: generateStableId(source.id, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
+                source_id: source.id, name: ch.name || `Channel ${idx}`, 
+                channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
+                logo_url: ch.logo || null, 
+                stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
+              }));
             
             accountInfo.credentials = { macAddress: mac, serverUrl: cleanUrl };
             const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, '{}', JSON.stringify(accountInfo));
