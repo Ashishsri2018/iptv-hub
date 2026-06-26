@@ -169,11 +169,12 @@ async function processImportUrl(url, sourceId, name) {
   }
 }
 
+// FIXED: Now passes displayName and 'Direct Streams' to generateStableId
 function createDirectChannel(sourceId, streamUrl, displayName) {
   return [{
-    id: generateStableId(sourceId, streamUrl, 1), 
+    id: generateStableId(sourceId, streamUrl, displayName || 'Unknown', 'Direct Streams'), 
     source_id: sourceId, 
-    name: displayName,
+    name: displayName || 'Unknown',
     channel_group: 'Direct Streams', 
     logo_url: null, 
     stream_url: streamUrl, 
@@ -239,7 +240,8 @@ async function runAutoRefresh(env) {
             if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream.");
             
             const channels = data.map((ch, idx) => ({ 
-              id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              id: generateStableId(source.id, `${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
+              source_id: source.id, name: ch.name || `Channel ${idx}`, 
               channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
               logo_url: ch.stream_icon || null, 
               stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch
@@ -259,7 +261,8 @@ async function runAutoRefresh(env) {
             if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker response.");
 
             const channels = chData.js.data.map((ch, idx) => ({ 
-              id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              id: generateStableId(source.id, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
+              source_id: source.id, name: ch.name || `Channel ${idx}`, 
               channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
               logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch
             }));
@@ -352,7 +355,8 @@ export default {
         if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
         
         const channels = data.map((ch, idx) => ({ 
-          id: `${sourceId}_xtream_${ch.stream_id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
+          id: generateStableId(sourceId, `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
+          source_id: sourceId, name: ch.name || `Channel ${idx}`, 
           channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
           logo_url: ch.stream_icon || null, 
           stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, raw_metadata: ch 
@@ -386,7 +390,8 @@ export default {
         if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker API response format.");
 
         const channels = chData.js.data.map((ch, idx) => ({ 
-          id: `${sourceId}_stalker_${ch.id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
+          id: generateStableId(sourceId, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
+          source_id: sourceId, name: ch.name || `Channel ${idx}`, 
           channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
           logo_url: ch.logo || null, 
           stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
@@ -452,7 +457,8 @@ export default {
             if (!Array.isArray(data)) throw new Error("Invalid data format from Xtream API.");
             
             const channels = data.map((ch, idx) => ({ 
-              id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              id: generateStableId(source.id, `${cleanUrl}/${u}/${p}/${ch.stream_id}`, ch.name || `Channel ${idx}`, catMap[String(ch.category_id)] || ch.category_name || 'Live TV'), 
+              source_id: source.id, name: ch.name || `Channel ${idx}`, 
               channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
               logo_url: ch.stream_icon || null, 
               stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch 
@@ -483,7 +489,8 @@ export default {
             if (!chData?.js?.data || !Array.isArray(chData.js.data)) throw new Error("Invalid Stalker response.");
 
             const channels = chData.js.data.map((ch, idx) => ({ 
-              id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
+              id: generateStableId(source.id, ch.cmd || `${cleanUrl}/ch/${ch.id}`, ch.name || `Channel ${idx}`, ch.tv_genre?.title || ch.tv_genre_id || 'Live TV'), 
+              source_id: source.id, name: ch.name || `Channel ${idx}`, 
               channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
               logo_url: ch.logo || null, 
               stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 

@@ -109,9 +109,9 @@ export default function AddSource() {
         let channels: any[] = [];
         let playlistMetadata = {};
 
-        // EXPLICIT MEDIA BYPASS
+        // EXPLICIT MEDIA BYPASS (FIXED TS ERROR HERE)
         if ((contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') && !isM3uMime) {
-            channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
+            channels = [{ id: generateStableId(tempSourceId, urlInput, finalName, 'Direct Streams'), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
         } else {
             // Read text safely
             const clientText = await response.text();
@@ -121,9 +121,9 @@ export default function AddSource() {
             if (lowerText.startsWith('<html') || lowerText.startsWith('<!doctype')) {
                 throw new Error("The link returned an HTML error webpage (Soft 404), not a video stream.");
             } 
-            // B. HLS Stream
+            // B. HLS Stream (FIXED TS ERROR HERE)
             else if (clientText.includes('#EXT-X-TARGETDURATION') || clientText.includes('#EXT-X-STREAM-INF')) {
-                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
+                channels = [{ id: generateStableId(tempSourceId, urlInput, finalName, 'Direct Streams'), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
             } 
             // C. Actual Playlist - USE SHARED PARSER
             else if (clientText.trimStart().startsWith('#EXTM3U')) {
@@ -132,9 +132,9 @@ export default function AddSource() {
                 channels = parsed.channels;
                 playlistMetadata = parsed.playlistMetadata;
             } 
-            // D. STRICT CATCH-ALL
+            // D. STRICT CATCH-ALL (FIXED TS ERROR HERE)
             else if (contentType.includes('octet-stream') || contentType === '') {
-                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
+                channels = [{ id: generateStableId(tempSourceId, urlInput, finalName, 'Direct Streams'), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
             }
             // E. REJECT
             else {
