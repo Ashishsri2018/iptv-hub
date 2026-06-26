@@ -1,11 +1,15 @@
 import { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom';
-import { Star, Tv, PlusSquare, FolderGit2, Settings as SettingsIcon, Menu, X } from 'lucide-react';
+// Added Globe icon for the Web Hub
+import { Star, Tv, PlusSquare, FolderGit2, Settings as SettingsIcon, Menu, X, Globe } from 'lucide-react';
 import Favorites from './pages/Favorites';
 import Channels from './pages/Channels';
 import AddSource from './pages/AddSource';
 import Sources from './pages/Sources';
 import Settings from './pages/Settings';
+// New imports for the Web Hub pages
+import Directory from './pages/Directory';
+import AddDirectory from './pages/AddDirectory';
 import PlayerOverlay from './components/PlayerOverlay';
 import { useAppStore } from './store';
 
@@ -17,11 +21,13 @@ export default function App() {
     fetchSettings(); // Download settings once when app boots!
   }, [fetchSettings]);
 
+  // Added Web Hub to the navigation array
   const navItems = [
     { path: '/', label: 'Favorites', icon: <Star size={20} /> },
     { path: '/channels', label: 'Channels', icon: <Tv size={20} /> },
     { path: '/add', label: 'Add Source', icon: <PlusSquare size={20} /> },
     { path: '/sources', label: 'Sources', icon: <FolderGit2 size={20} /> },
+    { path: '/directory', label: 'Web Hub', icon: <Globe size={20} /> },
     { path: '/settings', label: 'Settings', icon: <SettingsIcon size={20} /> },
   ];
 
@@ -60,6 +66,11 @@ export default function App() {
             <Route path="/channels" element={<Channels />} />
             <Route path="/add" element={<AddSource />} />
             <Route path="/sources" element={<Sources />} />
+            
+            {/* New Routes for the Web Directory */}
+            <Route path="/directory" element={<Directory />} />
+            <Route path="/directory/add" element={<AddDirectory />} />
+            
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
