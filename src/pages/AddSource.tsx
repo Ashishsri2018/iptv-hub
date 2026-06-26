@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle, Tv, Eye, EyeOff, RefreshCw } from 'lucide-react';
 import { API_URL } from '../config';
 
+// 1. IMPORT THE UNIFIED SHARED PARSER
+import { parseM3UString, generateStableId } from '../shared/m3uParser';
+
 export default function AddSource() {
   const [activeTab, setActiveTab] = useState<'url' | 'file' | 'xtream' | 'stalker'>('url');
   
@@ -32,131 +35,6 @@ export default function AddSource() {
     setSelectedFile(null); setFileNameInput('');
     setServerUrl(''); setUsername(''); setPassword(''); setMacAddress('');
     setShowPassword(false);
-  };
-
-  const generateStableId = (sourceId: string, streamUrl: string, count: number) => {
-    let hash = 5381;
-    for (let i = 0; i < streamUrl.length; i++) hash = (hash * 33) ^ streamUrl.charCodeAt(i);
-    const hashStr = (hash >>> 0).toString(36);
-    const tail = streamUrl.replace(/[^a-zA-Z0-9]/g, '').slice(-15);
-    return `${sourceId}_${hashStr}_${tail}_${count}`;
-  };
-
-  const cleanChannelName = (name: string) => {
-    return name.replace(/[\[\]\(\)\{\}]/g, ' ').replace(/\s+/g, ' ').replace(/^\s*-\s*|\s*-\s*$/g, '').trim().slice(0, 120);
-  };
-
-  // METADATA FIREWALL: Looks ONLY at the provider's metadata tags. SKIPS VOD/Movies, ALLOWS Radio.
-  const isVod = (metadata: any) => {
-    const type = (metadata['tvg-type'] || metadata.type || '').toLowerCase().trim();
-    const group = (metadata['group-title'] || '').toLowerCase().trim();
-
-    // Check explicit provider metadata types for VOD/Movies
-    if (['vod', 'movie', 'series', 'cinema', 'film'].includes(type)) return true;
-    if (type.includes('vod') || type.includes('series') || type.includes('movie')) return true;
-
-    // Check strict group-title matches for VOD/Movies
-    if (group === 'vod' || group === 'vods' || group === 'movies' || group === 'series' || group === 'cinema') return true;
-    if (group.startsWith('vod ') || group.startsWith('vod-') || group.startsWith('movies ') || group.startsWith('movies-') || group.startsWith('series ') || group.startsWith('series-')) return true;
-
-    return false; // Not a VOD, so allow it!
-  };
-
-  const pushChannelLocally = (channels: any[], current: any, sourceId: string, urlCounts: Map<string, number>) => {
-    if (!current.stream_url) return;
-    
-    // Metadata Firewall: Drop VOD/Movies instantly based on playlist tags
-    if (isVod(current.raw_metadata)) {
-      return; 
-    }
-
-    const count = (urlCounts.get(current.stream_url) || 0) + 1;
-    urlCounts.set(current.stream_url, count);
-
-    channels.push({
-      id: generateStableId(sourceId, current.stream_url, count),
-      source_id: sourceId, 
-      name: current.name || 'Unknown',
-      channel_group: current.channel_group || 'Other',
-      logo_url: current.logo_url, 
-      stream_url: current.stream_url,
-      raw_metadata: JSON.stringify(current.raw_metadata) 
-    });
-  };
-
-  // CLIENT-SIDE ADVANCED PARSER (Runs on Phone/Browser for File Uploads and Home IP Fallback)
-  const parseM3ULocally = (text: string, sourceId: string) => {
-    const lines = text.split(/\r?\n/);
-    const channels: any[] = [];
-    const urlCounts = new Map<string, number>();
-    
-    let currentChannel: any = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
-    let pendingGroup: string | null = null;
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#EXTM3U')) continue;
-
-      if (line.startsWith('#EXTGRP:')) { 
-        pendingGroup = line.substring(8).trim(); 
-        continue; 
-      }
-
-      if (line.startsWith('#EXTINF:')) {
-        if (currentChannel.stream_url) {
-           pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
-           currentChannel = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
-        }
-        
-        const attrRegex = /([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
-        let match;
-        while ((match = attrRegex.exec(line)) !== null) {
-          const key = match[1].toLowerCase();
-          const value = (match[2] || match[3] || match[4] || '').trim();
-          currentChannel.raw_metadata[key] = value;
-
-          if (key === 'group-title') currentChannel.channel_group = value;
-          if (key === 'tvg-logo' || key === 'logo') currentChannel.logo_url = value;
-          if (key === 'tvg-name' || key === 'tvg-id' || key === 'name') currentChannel.name = value;
-          if (key === 'catchup' || key === 'timeshift') currentChannel.raw_metadata.catchup = value;
-        }
-
-        const commaIndex = line.lastIndexOf(',');
-        if (commaIndex !== -1) {
-          let namePart = line.substring(commaIndex + 1).trim();
-          if (namePart && namePart !== '-1' && namePart.length > 1) {
-            currentChannel.name = cleanChannelName(namePart);
-          }
-        }
-
-        if (pendingGroup) { 
-          currentChannel.channel_group = pendingGroup; 
-          pendingGroup = null; 
-        }
-      } 
-      else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#KODIPROP:') || line.startsWith('#EXTHTTP:')) {
-        const match = line.match(/#(?:EXTVLCOPT|KODIPROP|EXTHTTP):([^=]+)=(.*)/i);
-        if (match) {
-          let key = match[1].trim(); let val = match[2].trim();
-          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
-          currentChannel.raw_metadata[key] = val;
-        }
-      } 
-      else if (/^(http|https|rtmp|udp|acestream|rtsp):\/\//i.test(line)) {
-        currentChannel.stream_url = line.trim();
-        if (pendingGroup) { 
-          currentChannel.channel_group = pendingGroup; 
-          pendingGroup = null; 
-        }
-        pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
-        currentChannel = { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
-      }
-    }
-    
-    // Push the final channel if exists
-    if (currentChannel.stream_url) pushChannelLocally(channels, currentChannel, sourceId, urlCounts);
-    
-    return channels;
   };
 
   // --- M3U URL DUPLICATE CHECKER & EXECUTER ---
@@ -221,11 +99,12 @@ export default function AddSource() {
         }
         
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        let channels = [];
+        let channels: any[] = [];
+        let playlistMetadata = {};
 
         // EXPLICIT MEDIA BYPASS
         if (contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') {
-            channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
+            channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
         } else {
             // Read text safely
             const clientText = await response.text();
@@ -237,16 +116,18 @@ export default function AddSource() {
             } 
             // B. HLS Stream
             else if (clientText.includes('#EXT-X-TARGETDURATION') || clientText.includes('#EXT-X-STREAM-INF')) {
-                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
+                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
             } 
-            // C. Actual Playlist
+            // C. Actual Playlist - USE SHARED PARSER
             else if (clientText.trimStart().startsWith('#EXTM3U')) {
                 setStatus({ type: null, message: 'Connected successfully! Parsing locally...' });
-                channels = parseM3ULocally(clientText, tempSourceId);
+                const parsed = parseM3UString(clientText, tempSourceId, finalName);
+                channels = parsed.channels;
+                playlistMetadata = parsed.playlistMetadata;
             } 
-            // D. Catch-all (No extension, unrecognised format, or generic text -> Direct Stream)
+            // D. Catch-all (No extension, unrecognised format -> Direct Stream)
             else {
-                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: '{}' }];
+                channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
             }
         }
 
@@ -258,10 +139,24 @@ export default function AddSource() {
         const CHUNK_SIZE = 5000;
         for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
            const chunk = channels.slice(i, i + CHUNK_SIZE);
+           
+           // Safety: ensure raw_metadata is an object before sending, as the worker stringifies it
+           const chunkToSend = chunk.map(c => ({
+             ...c,
+             raw_metadata: typeof c.raw_metadata === 'string' ? JSON.parse(c.raw_metadata) : c.raw_metadata
+           }));
+
            const bulkRes = await fetch(`${API_URL}/api/sources/import-bulk`, {
              method: 'POST',
              headers: { 'Content-Type': 'application/json' },
-             body: JSON.stringify({ sourceId: tempSourceId, name: finalName, type: 'M3U URL', channels: chunk, url: urlInput })
+             body: JSON.stringify({ 
+               sourceId: tempSourceId, 
+               name: finalName, 
+               type: 'M3U URL', 
+               channels: chunkToSend, 
+               url: urlInput,
+               playlistMetadata // Send extracted EPG metadata to worker
+             })
            });
            if (!bulkRes.ok) throw new Error(`Database rejected upload chunk: ${bulkRes.status}`);
         }
@@ -361,7 +256,10 @@ export default function AddSource() {
       const sourceId = `src_local_${crypto.randomUUID()}`;
       const finalName = fileNameInput.trim() || selectedFile.name;
       
-      const channels = parseM3ULocally(text, sourceId);
+      // USE SHARED PARSER
+      const parsed = parseM3UString(text, sourceId, finalName);
+      const channels = parsed.channels;
+      const playlistMetadata = parsed.playlistMetadata;
       
       if (channels.length === 0) throw new Error("No readable Live TV channels found in file (VODs skipped).");
       
@@ -370,10 +268,23 @@ export default function AddSource() {
       const CHUNK_SIZE = 5000;
       for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
          const chunk = channels.slice(i, i + CHUNK_SIZE);
+         
+         // Safety check to prevent double-stringifying metadata
+         const chunkToSend = chunk.map(c => ({
+           ...c,
+           raw_metadata: typeof c.raw_metadata === 'string' ? JSON.parse(c.raw_metadata) : c.raw_metadata
+         }));
+
          const res = await fetch(`${API_URL}/api/sources/import-bulk`, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
-           body: JSON.stringify({ sourceId, name: finalName, type: 'M3U File', channels: chunk })
+           body: JSON.stringify({ 
+             sourceId, 
+             name: finalName, 
+             type: 'M3U File', 
+             channels: chunkToSend,
+             playlistMetadata // Send extracted EPG metadata to worker
+           })
          });
          if (!res.ok) throw new Error("Database upload failed.");
       }
