@@ -17,23 +17,23 @@ export interface PlaylistMetadata {
   [key: string]: any;
 }
 
-export function generateStableId(sourceId: string, streamUrl: string, count: number): string {
+// Generates a truly immutable ID based on channel characteristics, not sequential order.
+export function generateStableId(sourceId: string, streamUrl: string, name: string, group: string): string {
+  const rawString = `${sourceId}_${streamUrl}_${name}_${group}`;
   let hash = 5381;
-  for (let i = 0; i < streamUrl.length; i++) {
-    hash = (hash * 33) ^ streamUrl.charCodeAt(i);
+  for (let i = 0; i < rawString.length; i++) {
+    hash = (hash * 33) ^ rawString.charCodeAt(i);
   }
-  const hashStr = (hash >>> 0).toString(36);
-  const tail = streamUrl.replace(/[^a-zA-Z0-9]/g, '').slice(-15);
-  return `${sourceId}_${hashStr}_${tail}_${count}`;
+  return `${sourceId}_${(hash >>> 0).toString(36)}`;
 }
 
 function cleanChannelName(name: string): string {
-  return name
+  const cleaned = name
     .replace(/\s+/g, ' ')
     .replace(/^\s*-\s*|\s*-\s*$/g, '')
-    .trim()
-    .normalize("NFC") 
-    .slice(0, 120);
+    .trim();
+  
+  return cleaned?.normalize?.("NFC") ?? cleaned;
 }
 
 function resetCurrentChannel(): Partial<Channel> {
@@ -41,27 +41,26 @@ function resetCurrentChannel(): Partial<Channel> {
     name: 'Unknown', 
     channel_group: 'Other', 
     logo_url: null, 
-    stream_url: undefined, 
     raw_metadata: {}
   };
 }
 
-// RELAXED VOD FIREWALL: Now requires explicit proof to avoid dropping live Movie networks.
+// RELAXED VOD FIREWALL: Requires explicit proof to avoid dropping live Movie networks.
 export function isVod(streamUrl: string, metadata: Record<string, any>): boolean {
   const lowerUrl = (streamUrl || '').toLowerCase();
   const type = (metadata['tvg-type'] || metadata.type || '').toLowerCase().trim();
   const group = (metadata['group-title'] || metadata['tvg-group'] || metadata['group'] || '').toLowerCase().trim();
 
-  // 1. Explicit VOD file extensions
-  if (/\.(mp4|mkv|avi|mov|wmv|flv)$/i.test(lowerUrl.split('?')[0])) return true;
+  // 1. Explicit VOD file extensions (Ignores ?params and #fragments)
+  if (/\.(mp4|mkv|avi|mov|wmv|flv)$/i.test(lowerUrl.split(/[?#]/)[0])) return true;
 
-  // 2. Xtream API Path markers
-  if (lowerUrl.includes('/movie/') || lowerUrl.includes('/series/') || lowerUrl.includes('/vod/')) return true;
+  // 2. Xtream API Path markers (Strict boundaries prevent matching /live/movie_network/)
+  if (/(^|\/)(movie|series|vod)(\/|$)/i.test(lowerUrl)) return true;
 
   // 3. Strict Metadata Types
   if (['vod', 'movie', 'series'].includes(type)) return true;
 
-  // 4. Strict Group Matching (Generic groups like "Movies" or "Cinema" are now allowed as Live TV)
+  // 4. Strict Group Matching
   if (group === 'vod' || group === 'vods' || group === 'series') return true;
 
   return false; 
@@ -75,12 +74,10 @@ function parseExtInf(line: string, current: Partial<Channel>) {
     const key = match[1].toLowerCase();
     const value = (match[2] || match[3] || match[4] || '').trim();
     
-    // Explicitly preserve tvg-name alongside the display name
     if (current.raw_metadata) {
       current.raw_metadata[key] = value;
     }
 
-    // Comprehensive category extraction
     if (['group-title', 'tvg-group', 'group', 'category', 'genre', 'group_name', 'playlist-group'].includes(key)) {
         current.channel_group = value;
     }
@@ -104,14 +101,13 @@ function parsePlayerOption(line: string, metadata: Record<string, any>) {
   const match = line.match(/#(?:EXTVLCOPT|KODIPROP|EXTHTTP):([^=]+)=(.*)/i);
   if (!match) return;
   
-  let key = match[1].trim(); 
+  const key = match[1].trim().toLowerCase(); 
   let val = match[2].trim();
   
   if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
     val = val.slice(1, -1);
   }
   
-  // Safely pack duplicate tags (like multiple http-headers) into arrays
   if (metadata[key]) {
     if (Array.isArray(metadata[key])) {
       metadata[key].push(val);
@@ -123,18 +119,15 @@ function parsePlayerOption(line: string, metadata: Record<string, any>) {
   }
 }
 
-function pushChannel(channels: Channel[], current: Partial<Channel>, sourceId: string, urlCounts: Map<string, number>) {
+function pushChannel(channels: Channel[], current: Partial<Channel>, sourceId: string) {
   if (!current.stream_url) return;
   
   if (isVod(current.stream_url, current.raw_metadata || {})) {
     return;
   }
 
-  const count = (urlCounts.get(current.stream_url) || 0) + 1;
-  urlCounts.set(current.stream_url, count);
-
   channels.push({
-    id: generateStableId(sourceId, current.stream_url, count),
+    id: generateStableId(sourceId, current.stream_url, current.name || 'Unknown', current.channel_group || 'Other'),
     source_id: sourceId, 
     name: current.name || 'Unknown',
     channel_group: current.channel_group || 'Other',
@@ -152,13 +145,17 @@ export function parseM3UString(text: string, sourceId: string, fallbackName = 'U
   text = text.replace(/^\uFEFF/, ''); 
 
   const channels: Channel[] = [];
-  const urlCounts = new Map<string, number>();
   const playlistMetadata: PlaylistMetadata = { name: fallbackName };
   
   let current = resetCurrentChannel();
   let pendingGroup: string | null = null;
 
-  // Stream iterator logic replaces .split() for massive memory savings
+  /**
+   * Iterate over each line without creating a large array.
+   * This reduces peak memory usage compared to text.split(),
+   * protecting Cloudflare RAM limits.
+   * Note: The playlist text itself is already in memory.
+   */
   const lineRegex = /([^\r\n]+)/g;
   let match;
 
@@ -183,26 +180,42 @@ export function parseM3UString(text: string, sourceId: string, fallbackName = 'U
     }
 
     if (line.startsWith('#EXTINF:')) {
-      parseExtInf(line, current);
-    } 
-    else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#KODIPROP:') || line.startsWith('#EXTHTTP:')) {
-      if (current.raw_metadata) parsePlayerOption(line, current.raw_metadata);
-    } 
-    else if (!line.startsWith('#')) {
-      // Valid URI scheme checker covers http, rtmp, udp:239, file, etc.
-      if (/^[a-z][a-z0-9+\-.]*:/i.test(line)) {
-        current.stream_url = line;
-        
-        if (pendingGroup) { 
-          current.channel_group = pendingGroup; 
-          pendingGroup = null; 
-        }
-        
-        // Push only when a URL is confirmed, preventing duplicate insertions
-        pushChannel(channels, current, sourceId, urlCounts);
+      // Protection against malformed playlists (duplicate EXTINF blocks)
+      if (current.name !== 'Unknown' || Object.keys(current.raw_metadata || {}).length > 0) {
         current = resetCurrentChannel();
       }
+      parseExtInf(line, current);
+      continue;
+    } 
+    
+    if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#KODIPROP:') || line.startsWith('#EXTHTTP:')) {
+      if (current.raw_metadata) parsePlayerOption(line, current.raw_metadata);
+      continue;
+    } 
+
+    if (line.startsWith('#')) {
+      continue; // Safely ignore unknown custom comments
     }
+
+    // Stream URL parsing with surgical trailing comment wipe
+    const streamUrl = line.replace(/\s+#.*$/, "").trim();
+
+    if (/^[a-z][a-z0-9+\-.]*:/i.test(streamUrl)) {
+      current.stream_url = streamUrl;
+      
+      if (pendingGroup) { 
+        current.channel_group = pendingGroup; 
+        pendingGroup = null; 
+      }
+      
+      pushChannel(channels, current, sourceId);
+      current = resetCurrentChannel();
+    }
+  }
+  
+  // Handle final incomplete/straggling channel
+  if (current.stream_url && (current.name !== 'Unknown' || current.stream_url)) {
+    pushChannel(channels, current, sourceId);
   }
 
   return { playlistMetadata, channels };
