@@ -77,7 +77,7 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
     await env.DB.prepare(`DELETE FROM channels WHERE id IN (${placeholders})`).bind(...chunk).run();
   }
 
-    const stmts = channels.map(ch => {
+  const stmts = channels.map(ch => {
     // SAFETY NET: Ensure metadata is always a string before D1 insertion
     const metaString = typeof ch.raw_metadata === 'object' ? JSON.stringify(ch.raw_metadata) : (ch.raw_metadata || '{}');
     
@@ -92,7 +92,6 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
         raw_metadata = excluded.raw_metadata
     `).bind(ch.id, ch.source_id, ch.name, ch.channel_group, ch.logo_url, ch.stream_url, metaString);
   });
-
   
   let successCount = 0;
   for (let i = 0; i < stmts.length; i += 50) {
@@ -123,24 +122,20 @@ async function processImportUrl(url, sourceId, name) {
       headers: { "User-Agent": "Mozilla/5.0 (compatible; IPTVParser/2.0)" } 
     });
     
-    // 1. STRICT PING CHECK
     if (!response.ok) {
       throw new Error(`URL connection rejected (Status ${response.status}). Verify the link is active.`);
     }
 
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
 
-    // 2. EXPLICIT INVALID HEADERS (Instantly block APIs and Webpages)
     if (contentType.includes('application/json') || contentType.includes('text/html')) {
         throw new Error("Invalid format. The link returned an HTML webpage or JSON API, not a playlist.");
     }
 
-    // 3. EXPLICIT MEDIA BYPASS (Audio/Video streams)
     if (contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') {
        return { playlistMetadata: {}, channels: createDirectChannel(sourceId, url, name || 'Direct Channel') };
     }
 
-    // 4. PEEK AT THE DATA STREAM
     if (response.body) {
        const peekResponse = response.clone();
        const reader = peekResponse.body.getReader();
@@ -149,25 +144,20 @@ async function processImportUrl(url, sourceId, name) {
        const firstChunkText = new TextDecoder().decode(value || new Uint8Array());
        const lowerText = firstChunkText.trimStart().toLowerCase();
        
-       // HTML Soft 404 Blocker (Fallback check)
        if (lowerText.startsWith('<html') || lowerText.startsWith('<!doctype')) {
            throw new Error("Invalid format. The link returned an HTML webpage (Soft 404), not a video stream.");
        }
        
-       // HLS Manifest (.m3u8 single channel)
        if (firstChunkText.includes('#EXT-X-TARGETDURATION') || firstChunkText.includes('#EXT-X-STREAM-INF')) {
            return { playlistMetadata: {}, channels: createDirectChannel(sourceId, url, name || 'HLS Stream') };
        }
 
-       // Full M3U Playlist - Pass to the Shared Parser
        if (firstChunkText.trimStart().startsWith('#EXTM3U')) {
            const fullText = await response.text();
            return parseM3UString(fullText, sourceId, name);
        }
     }
 
-    // 5. STRICT CATCH-ALL
-    // Only allow unidentifiable formats if the server explicitly states it is raw binary data or lacks a content-type.
     if (contentType.includes('application/octet-stream') || contentType === '') {
         return { playlistMetadata: {}, channels: createDirectChannel(sourceId, url, name || 'Direct Channel') };
     }
@@ -189,6 +179,21 @@ function createDirectChannel(sourceId, streamUrl, displayName) {
     stream_url: streamUrl, 
     raw_metadata: {}
   }];
+}
+
+// ROBUST XTREAM CATEGORY EXTRACTION HELPER
+async function fetchXtreamCategories(cleanUrl, u, p, headers) {
+  let catMap = {};
+  try {
+    const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_categories`, { headers });
+    const catData = await catRes.json();
+    if (Array.isArray(catData)) {
+      catData.forEach(c => { if (c.category_id) catMap[String(c.category_id)] = c.category_name; });
+    } else if (typeof catData === 'object' && catData !== null) {
+      Object.values(catData).forEach(c => { if (c && c.category_id) catMap[String(c.category_id)] = c.category_name; });
+    }
+  } catch (e) { console.warn("Category fetch failed"); }
+  return catMap;
 }
 
 // ----------------------------------------------------
@@ -227,12 +232,7 @@ async function runAutoRefresh(env) {
             const p = accountInfo.credentials.password;
             
             const headers = { "User-Agent": "IPTVSmarters/1.0" };
-            let catMap = {};
-            try {
-              const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_categories`, { headers });
-              const catData = await catRes.json();
-              if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
-            } catch (e) {}
+            const catMap = await fetchXtreamCategories(cleanUrl, u, p, headers);
 
             const response = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_streams`, { headers });
             const data = await response.json();
@@ -240,7 +240,8 @@ async function runAutoRefresh(env) {
             
             const channels = data.map((ch, idx) => ({ 
               id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
+              channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
+              logo_url: ch.stream_icon || null, 
               stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch
             }));
             await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, '{}', JSON.stringify(accountInfo));
@@ -259,7 +260,8 @@ async function runAutoRefresh(env) {
 
             const channels = chData.js.data.map((ch, idx) => ({ 
               id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch
+              channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
+              logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch
             }));
             await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, '{}', JSON.stringify(accountInfo));
           }
@@ -312,13 +314,14 @@ export default {
         
         await env.DB.prepare("UPDATE sources SET playlist_metadata = ? WHERE id = ?").bind(metaStr, sourceId).run();
 
-        const stmts = rawChannels.map(ch => 
-          env.DB.prepare(`
+        const stmts = rawChannels.map(ch => {
+          const metaString = typeof ch.raw_metadata === 'object' ? JSON.stringify(ch.raw_metadata) : (ch.raw_metadata || '{}');
+          return env.DB.prepare(`
             INSERT INTO channels (id, source_id, name, channel_group, logo_url, stream_url, raw_metadata) 
             VALUES (?, ?, ?, ?, ?, ?, ?) 
             ON CONFLICT(id) DO UPDATE SET name = excluded.name, channel_group = excluded.channel_group, logo_url = excluded.logo_url, stream_url = excluded.stream_url, raw_metadata = excluded.raw_metadata
-          `).bind(ch.id, sourceId, ch.name, ch.channel_group, ch.logo_url, ch.stream_url, JSON.stringify(ch.raw_metadata || {}))
-        );
+          `).bind(ch.id, sourceId, ch.name, ch.channel_group, ch.logo_url, ch.stream_url, metaString);
+        });
         
         for (let i = 0; i < stmts.length; i += 50) { 
           try { await env.DB.batch(stmts.slice(i, i + 50)); } catch(e) { throw new Error(`File chunk processing failed: ${e.message}`); }
@@ -335,12 +338,7 @@ export default {
         const sourceId = body.sourceId || await getOrCreateSourceId(env, cleanUrl);
         const headers = { "User-Agent": "IPTVSmarters/1.0" };
         
-        let catMap = {};
-        try {
-          const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${body.username}&password=${body.password}&action=get_live_categories`, { headers });
-          const catData = await catRes.json();
-          if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
-        } catch (e) {}
+        const catMap = await fetchXtreamCategories(cleanUrl, body.username, body.password, headers);
 
         let accountInfo = { credentials: { username: body.username, password: body.password, serverUrl: cleanUrl } };
         try {
@@ -355,7 +353,8 @@ export default {
         
         const channels = data.map((ch, idx) => ({ 
           id: `${sourceId}_xtream_${ch.stream_id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
-          channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
+          channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
+          logo_url: ch.stream_icon || null, 
           stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, raw_metadata: ch 
         }));
         
@@ -388,7 +387,8 @@ export default {
 
         const channels = chData.js.data.map((ch, idx) => ({ 
           id: `${sourceId}_stalker_${ch.id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
-          channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, 
+          channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
+          logo_url: ch.logo || null, 
           stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
         }));
         
@@ -439,13 +439,7 @@ export default {
             
             const cleanUrl = source.url.replace(/\/$/, '');
             const headers = { "User-Agent": "IPTVSmarters/1.0" };
-            
-            let catMap = {};
-            try {
-              const catRes = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}&action=get_live_categories`, { headers });
-              const catData = await catRes.json();
-              if (Array.isArray(catData)) catData.forEach(c => { catMap[c.category_id] = c.category_name; });
-            } catch (e) {}
+            const catMap = await fetchXtreamCategories(cleanUrl, u, p, headers);
 
             try {
               const accRes = await safeFetch(`${cleanUrl}/player_api.php?username=${u}&password=${p}`, { headers });
@@ -459,7 +453,8 @@ export default {
             
             const channels = data.map((ch, idx) => ({ 
               id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
+              channel_group: catMap[String(ch.category_id)] || ch.category_name || 'Live TV', 
+              logo_url: ch.stream_icon || null, 
               stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch 
             }));
             
@@ -489,7 +484,8 @@ export default {
 
             const channels = chData.js.data.map((ch, idx) => ({ 
               id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, 
+              channel_group: ch.tv_genre?.title || ch.tv_genre_id || 'Live TV', 
+              logo_url: ch.logo || null, 
               stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
             }));
             

@@ -35,7 +35,7 @@ function resetCurrentChannel(): any {
 export function isVod(streamUrl: string, metadata: any): boolean {
   const lowerUrl = (streamUrl || '').toLowerCase();
   const type = (metadata['tvg-type'] || metadata.type || '').toLowerCase().trim();
-  const group = (metadata['group-title'] || '').toLowerCase().trim();
+  const group = (metadata['group-title'] || metadata['tvg-group'] || metadata['group'] || '').toLowerCase().trim();
 
   // 1. URL Path markers (Catches M3U_Plus VODs & Series)
   if (lowerUrl.includes('/movie/') || lowerUrl.includes('/series/') || lowerUrl.includes('/vod/')) return true;
@@ -61,7 +61,8 @@ function parseExtInf(line: string, current: any) {
     const value = (match[2] || match[3] || match[4] || '').trim();
     current.raw_metadata[key] = value;
 
-    if (key === 'group-title') current.channel_group = value;
+    // ROBUST CATEGORY EXTRACTION
+    if (key === 'group-title' || key === 'tvg-group' || key === 'group' || key === 'category') current.channel_group = value;
     if (key === 'tvg-logo' || key === 'logo') current.logo_url = value;
     if (key === 'tvg-name' || key === 'tvg-id' || key === 'name') current.name = value;
     if (key === 'catchup' || key === 'timeshift') current.raw_metadata.catchup = value;
@@ -118,8 +119,6 @@ export function parseM3UString(text: string, sourceId: string, fallbackName = 'U
   const lines = text.split(/\r?\n/);
   const channels: any[] = [];
   const urlCounts = new Map<string, number>();
-  
-  // FIXED: We now use the fallbackName as the default metadata name!
   const playlistMetadata: Record<string, string> = { name: fallbackName };
   
   let current = resetCurrentChannel();
