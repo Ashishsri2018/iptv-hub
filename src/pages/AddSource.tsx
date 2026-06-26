@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle, Tv, Eye, EyeOff, RefreshCw } from 'lucide-react';
 import { API_URL } from '../config';
 
-// 1. IMPORT THE UNIFIED SHARED PARSER
+// 1. IMPORT THE UNIFIED SHARED PARSER HERE
 import { parseM3UString, generateStableId } from '../shared/m3uParser';
 
 export default function AddSource() {
