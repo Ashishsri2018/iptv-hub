@@ -77,8 +77,11 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
     await env.DB.prepare(`DELETE FROM channels WHERE id IN (${placeholders})`).bind(...chunk).run();
   }
 
-  const stmts = channels.map(ch => 
-    env.DB.prepare(`
+    const stmts = channels.map(ch => {
+    // SAFETY NET: Ensure metadata is always a string before D1 insertion
+    const metaString = typeof ch.raw_metadata === 'object' ? JSON.stringify(ch.raw_metadata) : (ch.raw_metadata || '{}');
+    
+    return env.DB.prepare(`
       INSERT INTO channels (id, source_id, name, channel_group, logo_url, stream_url, raw_metadata) 
       VALUES (?, ?, ?, ?, ?, ?, ?) 
       ON CONFLICT(id) DO UPDATE SET 
@@ -87,8 +90,9 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
         logo_url = excluded.logo_url, 
         stream_url = excluded.stream_url, 
         raw_metadata = excluded.raw_metadata
-    `).bind(ch.id, ch.source_id, ch.name, ch.channel_group, ch.logo_url, ch.stream_url, ch.raw_metadata || '{}')
-  );
+    `).bind(ch.id, ch.source_id, ch.name, ch.channel_group, ch.logo_url, ch.stream_url, metaString);
+  });
+
   
   let successCount = 0;
   for (let i = 0; i < stmts.length; i += 50) {
