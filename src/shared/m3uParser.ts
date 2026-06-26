@@ -118,7 +118,9 @@ export function parseM3UString(text: string, sourceId: string, fallbackName = 'U
   const lines = text.split(/\r?\n/);
   const channels: any[] = [];
   const urlCounts = new Map<string, number>();
-  const playlistMetadata: Record<string, string> = {};
+  
+  // FIXED: We now use the fallbackName as the default metadata name!
+  const playlistMetadata: Record<string, string> = { name: fallbackName };
   
   let current = resetCurrentChannel();
   let pendingGroup: string | null = null;
