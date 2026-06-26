@@ -97,6 +97,19 @@ export default function Directory() {
     }
   };
 
+  const deleteCategory = async (categoryId: number, categoryName: string) => {
+    if (!window.confirm(`Delete the entire "${categoryName}" category? This will wipe all links inside it too!`)) return;
+
+    setCategories(prev => prev.filter(cat => cat.id !== categoryId));
+
+    try {
+      await fetch(`${API_URL}/categories/${categoryId}`, { method: 'DELETE' });
+    } catch (err) {
+      console.error("Failed to delete category", err);
+      fetchDirectory();
+    }
+  };
+
   const sortLinks = (links: DirectoryLink[]) => {
     return [...links].sort((a, b) => {
       if (a.is_starred !== b.is_starred) {
@@ -115,7 +128,8 @@ export default function Directory() {
   }
 
   return (
-    <div className="h-full overflow-y-auto p-3 md:p-6">
+    /* Added pb-28 here to ensure it scrolls perfectly above Android navigation bars */
+    <div className="h-full overflow-y-auto p-3 md:p-6 pb-28 md:pb-6">
       <div className="max-w-[1400px] mx-auto">
         
         <div className="flex justify-between items-center mb-6">
@@ -129,7 +143,6 @@ export default function Directory() {
               onClick={forceStatusCheck}
               disabled={isChecking}
               className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-              title="Verify if sites are live"
             >
               <RefreshCw size={16} className={isChecking ? "animate-spin text-blue-400" : ""} />
               <span className="hidden sm:inline">{isChecking ? 'Checking...' : 'Check Status'}</span>
@@ -161,12 +174,22 @@ export default function Directory() {
           <div className="space-y-6">
             {categories.map((category) => (
               <div key={category.id} className="bg-slate-950/40 rounded-lg border border-slate-800 p-4">
-                <h2 className="text-lg font-bold text-slate-200 border-b border-slate-800 pb-2 mb-3">
-                  {category.name}
-                </h2>
+                
+                {/* Updated Category Header with Delete Button */}
+                <div className="flex justify-between items-center border-b border-slate-800 pb-2 mb-3">
+                  <h2 className="text-lg font-bold text-slate-200">
+                    {category.name}
+                  </h2>
+                  <button 
+                    onClick={() => deleteCategory(category.id, category.name)}
+                    className="p-1.5 rounded hover:bg-red-900/30 text-slate-600 hover:text-red-400 transition-colors"
+                    title="Delete category and all its links"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
                 
                 {category.links && category.links.length > 0 ? (
-                  /* HIGH DENSITY GRID */
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
                     {sortLinks(category.links).map((link) => (
                       <div 
@@ -193,9 +216,10 @@ export default function Directory() {
                                   className={link.is_starred ? "fill-yellow-500 text-yellow-500" : "text-slate-500"} 
                                 />
                               </button>
+                              {/* Fix: opacity-100 makes it permanently visible on mobile now */}
                               <button 
                                 onClick={() => deleteLink(category.id, link.id)}
-                                className="p-1 rounded hover:bg-red-900/30 text-slate-500 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
+                                className="p-1 rounded hover:bg-red-900/30 text-slate-500 hover:text-red-400 transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                               >
                                 <Trash2 size={14} />
                               </button>
