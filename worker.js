@@ -1,3 +1,5 @@
+import { generateStableId, parseM3UString } from './shared/m3uParser.js';
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*", 
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -26,14 +28,6 @@ function validateUrl(target) {
   }
 }
 
-function generateStableId(sourceId, streamUrl, count) {
-  let hash = 5381;
-  for (let i = 0; i < streamUrl.length; i++) hash = (hash * 33) ^ streamUrl.charCodeAt(i);
-  const hashStr = (hash >>> 0).toString(36);
-  const tail = streamUrl.replace(/[^a-zA-Z0-9]/g, '').slice(-15);
-  return `${sourceId}_${hashStr}_${tail}_${count}`;
-}
-
 async function safeFetch(url, options = {}) {
   const target = validateUrl(url);
   const controller = new AbortController();
@@ -56,17 +50,18 @@ async function getOrCreateSourceId(env, url) {
 // ----------------------------------------------------
 // THE TRUE SYNC ENGINE 
 // ----------------------------------------------------
-async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUrl, accountInfo = '{}') {
-  if (!channels || channels.length === 0) throw new Error("Parser finished, but found 0 readable channels.");
+async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUrl, playlistMetadata = '{}', accountInfo = '{}') {
+  if (!channels || channels.length === 0) throw new Error("No live channels found (VODs were skipped).");
   
   await env.DB.prepare(`
     INSERT INTO sources (id, name, type, url, channel_count, playlist_metadata, account_info) 
-    VALUES (?, ?, ?, ?, 0, '{}', ?) 
+    VALUES (?, ?, ?, ?, 0, ?, ?) 
     ON CONFLICT(id) DO UPDATE SET 
       last_updated = CURRENT_TIMESTAMP, 
       name = excluded.name,
+      playlist_metadata = excluded.playlist_metadata,
       account_info = excluded.account_info
-  `).bind(sourceId, name, type, sourceUrl, accountInfo).run();
+  `).bind(sourceId, name, type, sourceUrl, playlistMetadata, accountInfo).run();
 
   const { results: existing } = await env.DB.prepare("SELECT id FROM channels WHERE source_id = ?").bind(sourceId).all();
   const existingIds = new Set(existing.map(r => r.id));
@@ -76,7 +71,7 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
 
   for (let i = 0; i < toDelete.length; i += 50) {
     const chunk = toDelete.slice(i, i + 50);
-    if (chunk.length === 0) continue; // Safety check from template
+    if (chunk.length === 0) continue;
     const placeholders = chunk.map(() => '?').join(',');
     await env.DB.prepare(`DELETE FROM favorites WHERE channel_id IN (${placeholders})`).bind(...chunk).run();
     await env.DB.prepare(`DELETE FROM channels WHERE id IN (${placeholders})`).bind(...chunk).run();
@@ -116,217 +111,80 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
 }
 
 // ----------------------------------------------------
-// UNIVERSAL MEMORY-SAFE M3U STREAMING IMPORT ENGINE 
+// THE CLOUDFLARE FETCH & ROUTE ENGINE
 // ----------------------------------------------------
-const MAX_CHANNELS = 50000;
-const MAX_PLAYLIST_SIZE = 150 * 1024 * 1024; // 150MB
-
 async function processImportUrl(url, sourceId, name) {
   try {
     const response = await safeFetch(url, { 
       headers: { "User-Agent": "Mozilla/5.0 (compatible; IPTVParser/2.0)" } 
     });
     
-    if (!response.ok) return createDirectChannel(sourceId, url, name || 'Direct Link');
+    // 1. STRICT PING CHECK
+    if (!response.ok) {
+      throw new Error(`URL connection rejected (Status ${response.status}). Verify the link is active.`);
+    }
 
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
-    const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-    
-    if (contentLength > MAX_PLAYLIST_SIZE) return createDirectChannel(sourceId, url, name || 'Large Media Stream');
 
-    const isMedia = contentType.startsWith('video/') || contentType.startsWith('audio/') || 
-                   contentType === 'application/dash+xml' || contentType.includes('mpeg');
-    const isMpegUrl = contentType.includes('mpegurl') || contentType.includes('m3u') || 
-                     url.endsWith('.m3u') || url.endsWith('.m3u8') || url.includes('type=m3u_plus');
-
-    if (isMedia && !isMpegUrl) return createDirectChannel(sourceId, url, name || 'Media Stream');
-
-    if (isMpegUrl || url.includes('m3u_plus') || url.endsWith('.m3u8')) {
-      const firstChunk = await response.clone().text().then(t => t.slice(0, 1000));
-      if (firstChunk.includes('#EXT-X-TARGETDURATION') || firstChunk.includes('#EXT-X-STREAM-INF')) {
-        return createDirectChannel(sourceId, url, name || 'HLS Stream');
-      }
+    // 2. EXPLICIT INVALID HEADERS (Instantly block APIs and Webpages)
+    if (contentType.includes('application/json') || contentType.includes('text/html')) {
+        throw new Error("Invalid format. The link returned an HTML webpage or JSON API, not a playlist.");
     }
 
-    // Attempt memory-safe streaming parser
+    // 3. EXPLICIT MEDIA BYPASS (Audio/Video streams)
+    if (contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') {
+       return { playlistMetadata: {}, channels: createDirectChannel(sourceId, url, name || 'Direct Channel') };
+    }
+
+    // 4. PEEK AT THE DATA STREAM
     if (response.body) {
-      try {
-        const channels = await parseM3UStream(response.body, sourceId, name);
-        if (channels.length > 0) return channels;
-      } catch (streamErr) {
-        console.warn("Streaming parser failed, falling back to text:", streamErr);
-      }
+       const peekResponse = response.clone();
+       const reader = peekResponse.body.getReader();
+       const { value } = await reader.read();
+       
+       const firstChunkText = new TextDecoder().decode(value || new Uint8Array());
+       const lowerText = firstChunkText.trimStart().toLowerCase();
+       
+       // HTML Soft 404 Blocker (Fallback check)
+       if (lowerText.startsWith('<html') || lowerText.startsWith('<!doctype')) {
+           throw new Error("Invalid format. The link returned an HTML webpage (Soft 404), not a video stream.");
+       }
+       
+       // HLS Manifest (.m3u8 single channel)
+       if (firstChunkText.includes('#EXT-X-TARGETDURATION') || firstChunkText.includes('#EXT-X-STREAM-INF')) {
+           return { playlistMetadata: {}, channels: createDirectChannel(sourceId, url, name || 'HLS Stream') };
+       }
+
+       // Full M3U Playlist - Pass to the Shared Parser
+       if (firstChunkText.trimStart().startsWith('#EXTM3U')) {
+           const fullText = await response.text();
+           return parseM3UString(fullText, sourceId, name);
+       }
     }
 
-    // Fallback parser if stream processing fails
-    const text = await response.text();
-    if (text.trimStart().startsWith('#EXTM3U')) {
-      const channels = parseM3UText(text, sourceId, name);
-      if (channels.length > 0) return channels;
+    // 5. STRICT CATCH-ALL
+    // Only allow unidentifiable formats if the server explicitly states it is raw binary data or lacks a content-type.
+    if (contentType.includes('application/octet-stream') || contentType === '') {
+        return { playlistMetadata: {}, channels: createDirectChannel(sourceId, url, name || 'Direct Channel') };
     }
 
-    return createDirectChannel(sourceId, url, name || 'Direct Link');
+    throw new Error("Invalid format. The URL did not return a valid M3U playlist or recognized media stream.");
 
   } catch (err) {
-    console.error("M3U Import failed for", url, err);
-    return createDirectChannel(sourceId, url, name || 'Direct Link');
+    throw new Error(err.message || "Failed to process the URL.");
   }
 }
 
 function createDirectChannel(sourceId, streamUrl, displayName) {
   return [{
-    id: generateStableId(sourceId, streamUrl, 1), source_id: sourceId, name: displayName,
-    channel_group: 'Direct Streams', logo_url: null, stream_url: streamUrl, raw_metadata: '{}'
+    id: generateStableId(sourceId, streamUrl, 1), 
+    source_id: sourceId, 
+    name: displayName,
+    channel_group: 'Direct Streams', 
+    logo_url: null, 
+    stream_url: streamUrl, 
+    raw_metadata: {}
   }];
-}
-
-async function parseM3UStream(stream, sourceId, fallbackName) {
-  const channels = [];
-  const urlCounts = new Map();
-  let current = resetCurrentChannel();
-  let pendingGroup = null;
-  let channelCount = 0;
-
-  const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = '';
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += value;
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() || ''; 
-
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line || line.startsWith('#EXTM3U')) continue;
-
-        if (channelCount >= MAX_CHANNELS) return channels;
-
-        if (line.startsWith('#EXTGRP:')) { pendingGroup = line.substring(8).trim(); continue; }
-
-        if (line.startsWith('#EXTINF:')) {
-          if (current.stream_url) pushChannel(channels, current, sourceId, urlCounts);
-          current = resetCurrentChannel();
-          parseExtInf(line, current);
-          if (pendingGroup) { current.channel_group = pendingGroup; pendingGroup = null; }
-        } 
-        else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#KODIPROP:') || line.startsWith('#EXTHTTP:')) {
-          parsePlayerOption(line, current.raw_metadata);
-        } 
-        else if (/^(http|https|rtmp|udp|acestream|rtsp):\/\//i.test(line)) {
-          current.stream_url = line.trim();
-          if (pendingGroup) { current.channel_group = pendingGroup; pendingGroup = null; }
-          pushChannel(channels, current, sourceId, urlCounts);
-          current = resetCurrentChannel();
-          channelCount++;
-        }
-      }
-    }
-    if (current.stream_url) pushChannel(channels, current, sourceId, urlCounts);
-  } finally { reader.releaseLock(); }
-  return channels.length > 0 ? channels : createDirectChannel(sourceId, '', fallbackName || 'Unknown Playlist');
-}
-
-function parseM3UText(text, sourceId, fallbackName) {
-  const lines = text.split(/\r?\n/);
-  const channels = [];
-  const urlCounts = new Map();
-  let current = resetCurrentChannel();
-  let pendingGroup = null;
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#EXTM3U')) continue;
-
-    if (line.startsWith('#EXTGRP:')) { pendingGroup = line.substring(8).trim(); continue; }
-
-    if (line.startsWith('#EXTINF:')) {
-      if (current.stream_url) pushChannel(channels, current, sourceId, urlCounts);
-      current = resetCurrentChannel();
-      parseExtInf(line, current);
-      if (pendingGroup) { current.channel_group = pendingGroup; pendingGroup = null; }
-    } 
-    else if (line.startsWith('#EXTVLCOPT:') || line.startsWith('#KODIPROP:') || line.startsWith('#EXTHTTP:')) {
-      parsePlayerOption(line, current.raw_metadata);
-    } 
-    else if (/^(http|https|rtmp|udp|acestream|rtsp):\/\//i.test(line)) {
-      current.stream_url = line.trim();
-      if (pendingGroup) { current.channel_group = pendingGroup; pendingGroup = null; }
-      pushChannel(channels, current, sourceId, urlCounts);
-      current = resetCurrentChannel();
-    }
-  }
-  if (current.stream_url) pushChannel(channels, current, sourceId, urlCounts);
-  return channels.length > 0 ? channels : createDirectChannel(sourceId, '', fallbackName || 'Unknown Playlist');
-}
-
-function resetCurrentChannel() {
-  return { name: 'Unknown', channel_group: 'Other', logo_url: null, stream_url: null, raw_metadata: {} };
-}
-
-function parseExtInf(line, current) {
-  const attrRegex = /([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
-  let match;
-  while ((match = attrRegex.exec(line)) !== null) {
-    const key = match[1].toLowerCase();
-    const value = (match[2] || match[3] || match[4] || '').trim();
-    current.raw_metadata[key] = value;
-
-    if (key === 'group-title') current.channel_group = value;
-    if (key === 'tvg-logo' || key === 'logo') current.logo_url = value;
-    if (key === 'tvg-name' || key === 'tvg-id' || key === 'name') current.name = value;
-    if (key === 'catchup' || key === 'timeshift') current.raw_metadata.catchup = value;
-  }
-
-  const commaIndex = line.lastIndexOf(',');
-  if (commaIndex !== -1) {
-    let namePart = line.substring(commaIndex + 1).trim();
-    if (namePart && namePart !== '-1' && namePart.length > 1) current.name = cleanChannelName(namePart);
-  }
-}
-
-function parsePlayerOption(line, metadata) {
-  const match = line.match(/#(?:EXTVLCOPT|KODIPROP|EXTHTTP):([^=]+)=(.*)/i);
-  if (!match) return;
-  let key = match[1].trim(); let val = match[2].trim();
-  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
-  metadata[key] = val;
-}
-
-function cleanChannelName(name) {
-  return name.replace(/[\[\]\(\)\{\}]/g, ' ').replace(/\s+/g, ' ').replace(/^\s*-\s*|\s*-\s*$/g, '').trim().slice(0, 120);
-}
-
-function detectContentType(streamUrl, metadata) {
-  const lowerUrl = streamUrl.toLowerCase();
-  const lowerName = (metadata.name || metadata['tvg-name'] || '').toLowerCase();
-  const group = (metadata['group-title'] || '').toLowerCase();
-
-  if (lowerUrl.includes('.mp3') || lowerUrl.includes('.aac') || lowerUrl.includes('audio') || 
-      lowerName.includes('radio') || group.includes('radio') || metadata.radio === 'true') return 'Radio';
-  if (lowerUrl.includes('/vod/') || lowerUrl.includes('movie') || lowerUrl.includes('series') || 
-      lowerName.includes('vod') || group.includes('vod') || group.includes('film') || group.includes('series')) return 'VOD';
-  return null;
-}
-
-function pushChannel(channels, current, sourceId, urlCounts) {
-  if (!current.stream_url) return;
-  const contentType = detectContentType(current.stream_url, current.raw_metadata);
-  if (contentType) current.channel_group = contentType;
-
-  const count = (urlCounts.get(current.stream_url) || 0) + 1;
-  urlCounts.set(current.stream_url, count);
-
-  channels.push({
-    id: generateStableId(sourceId, current.stream_url, count),
-    source_id: sourceId, name: current.name || 'Unknown',
-    channel_group: current.channel_group || 'Other',
-    logo_url: current.logo_url, stream_url: current.stream_url,
-    raw_metadata: JSON.stringify(current.raw_metadata)
-  });
 }
 
 // ----------------------------------------------------
@@ -355,8 +213,8 @@ async function runAutoRefresh(env) {
         
         try {
           if (source.type === 'M3U URL') {
-            const channels = await processImportUrl(source.url, source.id, source.name);
-            await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url, JSON.stringify(accountInfo));
+            const parsedData = await processImportUrl(source.url, source.id, source.name);
+            await insertDatabaseBatch(env, parsedData.channels, source.id, source.name, source.type, source.url, JSON.stringify(parsedData.playlistMetadata), JSON.stringify(accountInfo));
           } 
           else if (source.type === 'Xtream API') {
             if (!accountInfo.credentials || !accountInfo.credentials.username) throw new Error("No Xtream credentials saved.");
@@ -379,9 +237,9 @@ async function runAutoRefresh(env) {
             const channels = data.map((ch, idx) => ({ 
               id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
               channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
-              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: JSON.stringify(ch)
+              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch
             }));
-            await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, JSON.stringify(accountInfo));
+            await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, '{}', JSON.stringify(accountInfo));
           } 
           else if (source.type === 'Stalker API') {
             if (!accountInfo.credentials || !accountInfo.credentials.macAddress) throw new Error("No Stalker MAC saved.");
@@ -397,9 +255,9 @@ async function runAutoRefresh(env) {
 
             const channels = chData.js.data.map((ch, idx) => ({ 
               id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
-              channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: JSON.stringify(ch)
+              channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch
             }));
-            await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, JSON.stringify(accountInfo));
+            await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, '{}', JSON.stringify(accountInfo));
           }
         } catch (e) {
           console.error(`Auto-Refresh failed for [${source.name}]:`, e);
@@ -436,22 +294,26 @@ export default {
         if (!body || !body.playlistUrl) throw new Error("Playlist URL is required.");
         
         const sourceId = body.sourceId || await getOrCreateSourceId(env, body.playlistUrl);
-        const channels = await processImportUrl(body.playlistUrl, sourceId, body.name);
-        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, body.type, body.playlistUrl);
+        const parsedData = await processImportUrl(body.playlistUrl, sourceId, body.name);
+        const count = await insertDatabaseBatch(env, parsedData.channels, sourceId, body.name, body.type, body.playlistUrl, JSON.stringify(parsedData.playlistMetadata));
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
       if (url.pathname === "/api/sources/import-bulk" && request.method === "POST") {
-        const { sourceId, name, type, channels: rawChannels, url: sourceUrl } = await request.json();
+        const { sourceId, name, type, channels: rawChannels, url: sourceUrl, playlistMetadata } = await request.json();
         const uniqueUrl = sourceUrl || `local://${sourceId}`;
-        await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, type, url, channel_count, playlist_metadata, account_info) VALUES (?, ?, ?, ?, 0, '{}', '{}')").bind(sourceId, name, type, uniqueUrl).run();
+        const metaStr = playlistMetadata ? JSON.stringify(playlistMetadata) : '{}';
+
+        await env.DB.prepare("INSERT OR IGNORE INTO sources (id, name, type, url, channel_count, playlist_metadata, account_info) VALUES (?, ?, ?, ?, 0, ?, '{}')").bind(sourceId, name, type, uniqueUrl, metaStr).run();
         
+        await env.DB.prepare("UPDATE sources SET playlist_metadata = ? WHERE id = ?").bind(metaStr, sourceId).run();
+
         const stmts = rawChannels.map(ch => 
           env.DB.prepare(`
             INSERT INTO channels (id, source_id, name, channel_group, logo_url, stream_url, raw_metadata) 
             VALUES (?, ?, ?, ?, ?, ?, ?) 
             ON CONFLICT(id) DO UPDATE SET name = excluded.name, channel_group = excluded.channel_group, logo_url = excluded.logo_url, stream_url = excluded.stream_url, raw_metadata = excluded.raw_metadata
-          `).bind(ch.id, sourceId, ch.name, ch.channel_group, ch.logo_url, ch.stream_url, ch.raw_metadata || '{}')
+          `).bind(ch.id, sourceId, ch.name, ch.channel_group, ch.logo_url, ch.stream_url, JSON.stringify(ch.raw_metadata || {}))
         );
         
         for (let i = 0; i < stmts.length; i += 50) { 
@@ -490,10 +352,10 @@ export default {
         const channels = data.map((ch, idx) => ({ 
           id: `${sourceId}_xtream_${ch.stream_id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
           channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
-          stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, raw_metadata: JSON.stringify(ch) 
+          stream_url: `${cleanUrl}/${body.username}/${body.password}/${ch.stream_id}`, raw_metadata: ch 
         }));
         
-        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Xtream API", cleanUrl, JSON.stringify(accountInfo));
+        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Xtream API", cleanUrl, '{}', JSON.stringify(accountInfo));
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
@@ -523,10 +385,10 @@ export default {
         const channels = chData.js.data.map((ch, idx) => ({ 
           id: `${sourceId}_stalker_${ch.id || idx}`, source_id: sourceId, name: ch.name || `Channel ${idx}`, 
           channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, 
-          stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: JSON.stringify(ch) 
+          stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
         }));
         
-        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Stalker API", cleanUrl, JSON.stringify(accountInfo));
+        const count = await insertDatabaseBatch(env, channels, sourceId, body.name, "Stalker API", cleanUrl, '{}', JSON.stringify(accountInfo));
         return Response.json({ success: true, count }, { headers: corsHeaders });
       }
 
@@ -562,8 +424,8 @@ export default {
           try { body = await request.json(); } catch(e) {}
 
           if (source.type === 'M3U URL') {
-            const channels = await processImportUrl(source.url, source.id, source.name);
-            const count = await insertDatabaseBatch(env, channels, source.id, source.name, source.type, source.url, JSON.stringify(accountInfo));
+            const parsedData = await processImportUrl(source.url, source.id, source.name);
+            const count = await insertDatabaseBatch(env, parsedData.channels, source.id, source.name, source.type, source.url, JSON.stringify(parsedData.playlistMetadata), JSON.stringify(accountInfo));
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else if (source.type === 'Xtream API') {
@@ -594,11 +456,11 @@ export default {
             const channels = data.map((ch, idx) => ({ 
               id: `${source.id}_xtream_${ch.stream_id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
               channel_group: catMap[ch.category_id] || ch.category_name || 'Live TV', logo_url: ch.stream_icon || null, 
-              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: JSON.stringify(ch) 
+              stream_url: `${cleanUrl}/${u}/${p}/${ch.stream_id}`, raw_metadata: ch 
             }));
             
             accountInfo.credentials = { username: u, password: p, serverUrl: cleanUrl };
-            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, JSON.stringify(accountInfo));
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Xtream API", cleanUrl, '{}', JSON.stringify(accountInfo));
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else if (source.type === 'Stalker API') {
@@ -624,11 +486,11 @@ export default {
             const channels = chData.js.data.map((ch, idx) => ({ 
               id: `${source.id}_stalker_${ch.id || idx}`, source_id: source.id, name: ch.name || `Channel ${idx}`, 
               channel_group: ch.tv_genre?.title || 'Live TV', logo_url: ch.logo || null, 
-              stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: JSON.stringify(ch) 
+              stream_url: ch.cmd || `${cleanUrl}/ch/${ch.id}`, raw_metadata: ch 
             }));
             
             accountInfo.credentials = { macAddress: mac, serverUrl: cleanUrl };
-            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, JSON.stringify(accountInfo));
+            const count = await insertDatabaseBatch(env, channels, source.id, source.name, "Stalker API", cleanUrl, '{}', JSON.stringify(accountInfo));
             return Response.json({ success: true, count }, { headers: corsHeaders });
           }
           else {
