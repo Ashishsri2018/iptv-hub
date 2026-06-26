@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Plus, Link as LinkIcon, FileText, Upload, Loader2, AlertCircle, CheckCircle, Tv, Eye, EyeOff, RefreshCw } from 'lucide-react';
 import { API_URL } from '../config';
 
-// 1. IMPORT THE UNIFIED SHARED PARSER HERE
+// 1. IMPORT THE UNIFIED SHARED PARSER
 import { parseM3UString, generateStableId } from '../shared/m3uParser';
 
 export default function AddSource() {
@@ -99,9 +99,10 @@ export default function AddSource() {
         }
         
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const isM3uMime = contentType.includes('mpegurl') || contentType.includes('m3u');
         
         // EXPLICIT INVALID HEADERS
-        if (contentType.includes('application/json') || contentType.includes('text/html')) {
+        if ((contentType.includes('application/json') || contentType.includes('text/html')) && !isM3uMime) {
             throw new Error("Invalid format. The link returned a web page or JSON API, not a video stream.");
         }
 
@@ -109,7 +110,7 @@ export default function AddSource() {
         let playlistMetadata = {};
 
         // EXPLICIT MEDIA BYPASS
-        if (contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') {
+        if ((contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') && !isM3uMime) {
             channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
         } else {
             // Read text safely
@@ -458,9 +459,14 @@ export default function AddSource() {
                     setLoading(true);
                     setStatus({ type: null, message: `Refreshing existing playlist "${src.name}"...` });
                     try {
-                      let payload = {};
-                      if (activeTab === 'xtream') payload = { username, password };
-                      else if (activeTab === 'stalker') payload = { macAddress };
+                      // FIXED: Only attach payload if user typed it, otherwise send empty to trigger auto-fetch from DB
+                      let payload: any = {};
+                      if (activeTab === 'xtream') {
+                        if (username) payload.username = username;
+                        if (password) payload.password = password;
+                      } else if (activeTab === 'stalker') {
+                        if (macAddress) payload.macAddress = macAddress;
+                      }
                       
                       const res = await fetch(`${API_URL}/api/sources/${src.id}/refresh`, {
                         method: 'POST',

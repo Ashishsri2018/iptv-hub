@@ -78,7 +78,6 @@ async function insertDatabaseBatch(env, channels, sourceId, name, type, sourceUr
   }
 
   const stmts = channels.map(ch => {
-    // SAFETY NET: Ensure metadata is always a string before D1 insertion
     const metaString = typeof ch.raw_metadata === 'object' ? JSON.stringify(ch.raw_metadata) : (ch.raw_metadata || '{}');
     
     return env.DB.prepare(`
@@ -127,12 +126,13 @@ async function processImportUrl(url, sourceId, name) {
     }
 
     const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    const isM3uMime = contentType.includes('mpegurl') || contentType.includes('m3u');
 
-    if (contentType.includes('application/json') || contentType.includes('text/html')) {
+    if ((contentType.includes('application/json') || contentType.includes('text/html')) && !isM3uMime) {
         throw new Error("Invalid format. The link returned an HTML webpage or JSON API, not a playlist.");
     }
 
-    if (contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') {
+    if ((contentType.startsWith('video/') || contentType.startsWith('audio/') || contentType === 'application/dash+xml') && !isM3uMime) {
        return { playlistMetadata: {}, channels: createDirectChannel(sourceId, url, name || 'Direct Channel') };
     }
 
