@@ -82,7 +82,7 @@ export default function AddSource() {
         return; // Success! Exit early.
       }
       
-      // If Cloudflare fails (e.g. 403 Forbidden IP Block), throw to trigger fallback
+      // If Cloudflare fails, throw to trigger fallback
       throw new Error(data.error || "Cloudflare Server failed to process URL.");
 
     } catch (cfError: any) {
@@ -93,12 +93,18 @@ export default function AddSource() {
         // 2. FALLBACK ROUTE: Fetch using Home IP
         const response = await fetch(urlInput);
         
-        // STRICT PING CONNECTION CHECK (Status 200)
+        // STRICT PING CONNECTION CHECK
         if (!response.ok) {
            throw new Error(`Device connection rejected with status: ${response.status}`);
         }
         
         const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        
+        // EXPLICIT INVALID HEADERS
+        if (contentType.includes('application/json') || contentType.includes('text/html')) {
+            throw new Error("Invalid format. The link returned a web page or JSON API, not a video stream.");
+        }
+
         let channels: any[] = [];
         let playlistMetadata = {};
 
@@ -125,9 +131,13 @@ export default function AddSource() {
                 channels = parsed.channels;
                 playlistMetadata = parsed.playlistMetadata;
             } 
-            // D. Catch-all (No extension, unrecognised format -> Direct Stream)
-            else {
+            // D. STRICT CATCH-ALL
+            else if (contentType.includes('octet-stream') || contentType === '') {
                 channels = [{ id: generateStableId(tempSourceId, urlInput, 1), source_id: tempSourceId, name: finalName, channel_group: 'Direct Streams', logo_url: null, stream_url: urlInput, raw_metadata: {} }];
+            }
+            // E. REJECT
+            else {
+                throw new Error("Invalid format. The URL did not return a valid M3U playlist or recognized media stream.");
             }
         }
 
@@ -140,8 +150,8 @@ export default function AddSource() {
         for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
            const chunk = channels.slice(i, i + CHUNK_SIZE);
            
-           // Safety: ensure raw_metadata is an object before sending, as the worker stringifies it
-           const chunkToSend = chunk.map(c => ({
+           // Safety: ensure raw_metadata is an object before sending, TS requires (c: any) here
+           const chunkToSend = chunk.map((c: any) => ({
              ...c,
              raw_metadata: typeof c.raw_metadata === 'string' ? JSON.parse(c.raw_metadata) : c.raw_metadata
            }));
@@ -269,8 +279,8 @@ export default function AddSource() {
       for (let i = 0; i < channels.length; i += CHUNK_SIZE) {
          const chunk = channels.slice(i, i + CHUNK_SIZE);
          
-         // Safety check to prevent double-stringifying metadata
-         const chunkToSend = chunk.map(c => ({
+         // Safety check to prevent double-stringifying metadata, TS requires (c: any) here
+         const chunkToSend = chunk.map((c: any) => ({
            ...c,
            raw_metadata: typeof c.raw_metadata === 'string' ? JSON.parse(c.raw_metadata) : c.raw_metadata
          }));
