@@ -1,4 +1,4 @@
-import { generateStableId, parseM3UString } from './shared/m3uParser.js';
+import { generateStableId, parseM3UString } from './src/shared/m3uParser';
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*", 
