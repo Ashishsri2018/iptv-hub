@@ -1,257 +1,170 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Star, Trash2, Plus, Globe, RefreshCw } from 'lucide-react';
+import { Star, Trash2, Plus, Globe, RefreshCw, Search, Pencil } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
 
 interface DirectoryLink {
-  id: number;
-  title: string;
-  url: string;
-  description: string;
-  is_starred: boolean;
-  status: string;
+  id: number; title: string; url: string; description: string;
+  is_starred: boolean; status: string; mirrors?: DirectoryLink[];
 }
-
-interface Category {
-  id: number;
-  name: string;
-  sort_order: number;
-  links: DirectoryLink[];
-}
+interface Category { id: number; name: string; links: DirectoryLink[]; }
 
 export default function Directory() {
   const [categories, setCategories] = useState<Category[]>([]);
+  const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isChecking, setIsChecking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchDirectory();
-  }, []);
+  useEffect(() => { fetchDirectory(); }, []);
 
   const fetchDirectory = async () => {
     try {
       const response = await fetch(`${API_URL}/directory`);
-      if (!response.ok) throw new Error('Failed to fetch directory');
-      const data = await response.json();
-      setCategories(data);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setIsLoading(false);
-    }
+      if (response.ok) setCategories(await response.json());
+    } catch (err) { console.error(err); } 
+    finally { setIsLoading(false); }
   };
 
   const forceStatusCheck = async () => {
     setIsChecking(true);
-    try {
-      await fetch(`${API_URL}/check-status`, { method: 'POST' });
-      await fetchDirectory(); 
-    } catch (err: any) {
-      console.error("Failed to check status", err);
-    } finally {
-      setIsChecking(false);
-    }
+    try { await fetch(`${API_URL}/check-status`, { method: 'POST' }); await fetchDirectory(); } 
+    catch (err) { console.error(err); } finally { setIsChecking(false); }
   };
 
-  const toggleStar = async (categoryId: number, linkId: number) => {
-    setCategories(prev => prev.map(cat => {
-      if (cat.id === categoryId) {
-        return {
-          ...cat,
-          links: cat.links.map(link => 
-            link.id === linkId ? { ...link, is_starred: !link.is_starred } : link
-          )
-        };
-      }
-      return cat;
-    }));
-
+  const editCategory = async (categoryId: number, oldName: string) => {
+    const newName = window.prompt("Enter new category name:", oldName);
+    if (!newName || newName === oldName) return;
+    setCategories(prev => prev.map(cat => cat.id === categoryId ? { ...cat, name: newName } : cat));
     try {
-      await fetch(`${API_URL}/links/${linkId}/star`, { method: 'PUT' });
-    } catch (err) {
-      console.error("Failed to update star status", err);
-      fetchDirectory(); 
-    }
-  };
-
-  const deleteLink = async (categoryId: number, linkId: number) => {
-    if (!window.confirm("Are you sure you want to delete this site?")) return;
-
-    setCategories(prev => prev.map(cat => {
-      if (cat.id === categoryId) {
-        return {
-          ...cat,
-          links: cat.links.filter(link => link.id !== linkId)
-        };
-      }
-      return cat;
-    }));
-
-    try {
-      await fetch(`${API_URL}/links/${linkId}`, { method: 'DELETE' });
-    } catch (err) {
-      console.error("Failed to delete link", err);
-      fetchDirectory();
-    }
+      await fetch(`${API_URL}/categories/${categoryId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName })
+      });
+    } catch (err) { console.error(err); fetchDirectory(); }
   };
 
   const deleteCategory = async (categoryId: number, categoryName: string) => {
-    if (!window.confirm(`Delete the entire "${categoryName}" category? This will wipe all links inside it too!`)) return;
-
+    if (!window.confirm(`Delete "${categoryName}" and ALL its links?`)) return;
     setCategories(prev => prev.filter(cat => cat.id !== categoryId));
+    try { await fetch(`${API_URL}/categories/${categoryId}`, { method: 'DELETE' }); } 
+    catch (err) { console.error(err); fetchDirectory(); }
+  };
 
-    try {
-      await fetch(`${API_URL}/categories/${categoryId}`, { method: 'DELETE' });
-    } catch (err) {
-      console.error("Failed to delete category", err);
-      fetchDirectory();
-    }
+  const toggleStar = async (categoryId: number, linkId: number) => {
+    setCategories(prev => prev.map(cat => cat.id === categoryId ? { ...cat, links: cat.links.map(link => link.id === linkId ? { ...link, is_starred: !link.is_starred } : link) } : cat));
+    try { await fetch(`${API_URL}/links/${linkId}/star`, { method: 'PUT' }); } 
+    catch (err) { fetchDirectory(); }
+  };
+
+  const deleteLink = async (categoryId: number, linkId: number) => {
+    if (!window.confirm("Delete this site?")) return;
+    setCategories(prev => prev.map(cat => cat.id === categoryId ? { ...cat, links: cat.links.filter(link => link.id !== linkId) } : cat));
+    try { await fetch(`${API_URL}/links/${linkId}`, { method: 'DELETE' }); } 
+    catch (err) { fetchDirectory(); }
   };
 
   const sortLinks = (links: DirectoryLink[]) => {
-    return [...links].sort((a, b) => {
-      if (a.is_starred !== b.is_starred) {
-        return a.is_starred ? -1 : 1;
-      }
-      return a.title.localeCompare(b.title);
-    });
+    return [...links].sort((a, b) => a.is_starred !== b.is_starred ? (a.is_starred ? -1 : 1) : a.title.localeCompare(b.title));
   };
 
-  if (isLoading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
-      </div>
-    );
-  }
+  // JS Search Filter
+  const filteredCategories = categories.map(cat => ({
+    ...cat,
+    links: cat.links.filter(link => 
+      link.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
+      link.url.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (link.description && link.description.toLowerCase().includes(searchTerm.toLowerCase()))
+    )
+  })).filter(cat => cat.links.length > 0 || cat.name.toLowerCase().includes(searchTerm.toLowerCase()));
+
+  if (isLoading) return <div className="flex h-full items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div></div>;
 
   return (
-    /* Added pb-28 here to ensure it scrolls perfectly above Android navigation bars */
     <div className="h-full overflow-y-auto p-3 md:p-6 pb-28 md:pb-6">
       <div className="max-w-[1400px] mx-auto">
-        
-        <div className="flex justify-between items-center mb-6">
+        <div className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-2">
             <Globe className="text-blue-500" size={24} />
             <h1 className="text-2xl font-bold text-slate-100">Web Directory</h1>
           </div>
-          
           <div className="flex items-center gap-2">
-            <button 
-              onClick={forceStatusCheck}
-              disabled={isChecking}
-              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-            >
+            <button onClick={forceStatusCheck} disabled={isChecking} className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
               <RefreshCw size={16} className={isChecking ? "animate-spin text-blue-400" : ""} />
               <span className="hidden sm:inline">{isChecking ? 'Checking...' : 'Check Status'}</span>
             </button>
-            
-            <Link 
-              to="/directory/add" 
-              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
-            >
-              <Plus size={16} />
-              <span className="hidden sm:inline">Add Resource</span>
+            <Link to="/directory/add" className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+              <Plus size={16} /> <span className="hidden sm:inline">Add</span>
             </Link>
           </div>
         </div>
 
-        {error && (
-          <div className="bg-red-900/50 border border-red-500 text-red-200 p-3 rounded-md mb-4 text-sm">
-            {error}
-          </div>
-        )}
+        <div className="mb-6 relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
+          <input type="text" placeholder="Search websites, URLs, or categories..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-slate-900/80 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-slate-200 focus:outline-none focus:border-blue-500 text-sm"/>
+        </div>
 
-        {categories.length === 0 && !error ? (
+        {filteredCategories.length === 0 ? (
           <div className="text-center py-12 text-slate-400">
             <Globe size={36} className="mx-auto mb-3 opacity-50" />
-            <p className="text-base">Your directory is empty.</p>
-            <p className="text-xs mt-1">Click "Add Resource" to start building your hub.</p>
+            <p className="text-base">No results found.</p>
           </div>
         ) : (
-          <div className="space-y-6">
-            {categories.map((category) => (
+          <div className="space-y-5">
+            {filteredCategories.map((category) => (
               <div key={category.id} className="bg-slate-950/40 rounded-lg border border-slate-800 p-4">
-                
-                {/* Updated Category Header with Delete Button */}
                 <div className="flex justify-between items-center border-b border-slate-800 pb-2 mb-3">
-                  <h2 className="text-lg font-bold text-slate-200">
-                    {category.name}
-                  </h2>
-                  <button 
-                    onClick={() => deleteCategory(category.id, category.name)}
-                    className="p-1.5 rounded hover:bg-red-900/30 text-slate-600 hover:text-red-400 transition-colors"
-                    title="Delete category and all its links"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  <h2 className="text-lg font-bold text-slate-200">{category.name}</h2>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => editCategory(category.id, category.name)} className="p-1.5 rounded hover:bg-blue-900/30 text-slate-500 hover:text-blue-400 transition-colors" title="Edit Category Name"><Pencil size={14} /></button>
+                    <button onClick={() => deleteCategory(category.id, category.name)} className="p-1.5 rounded hover:bg-red-900/30 text-slate-500 hover:text-red-400 transition-colors" title="Delete Category"><Trash2 size={14} /></button>
+                  </div>
                 </div>
                 
-                {category.links && category.links.length > 0 ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
-                    {sortLinks(category.links).map((link) => (
-                      <div 
-                        key={link.id} 
-                        className="group flex flex-col justify-between bg-slate-900/80 border border-slate-700 hover:border-slate-500 rounded-md p-3 transition-all"
-                      >
-                        <div>
-                          <div className="flex justify-between items-start mb-0.5">
-                            <a 
-                              href={link.url}
-                              target="_self"
-                              className="text-sm font-semibold text-blue-400 hover:text-blue-300 transition-colors line-clamp-1 pr-2"
-                              title={link.title}
-                            >
+                {/* Scrollable Container with Custom Webkit scrollbar CSS injected via Tailwind brackets */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 max-h-[220px] overflow-y-auto overflow-x-hidden pr-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb]:rounded-full">
+                  {sortLinks(category.links).map((link) => (
+                    <div key={link.id} className="group flex flex-col justify-between bg-slate-900/80 border border-slate-700 hover:border-slate-500 rounded-md p-2.5 transition-all">
+                      <div>
+                        {/* Inline Layout with Absolute action buttons */}
+                        <div className="relative mb-1">
+                          <div className="flex flex-wrap items-center gap-1.5 pr-14 overflow-hidden">
+                            <a href={link.url} target="_blank" rel="noreferrer" className="text-sm font-semibold text-blue-400 hover:text-blue-300 truncate max-w-full">
                               {link.title}
                             </a>
-                            <div className="flex items-center gap-1 shrink-0">
-                              <button 
-                                onClick={() => toggleStar(category.id, link.id)}
-                                className="p-1 rounded hover:bg-slate-800 transition-colors"
-                              >
-                                <Star 
-                                  size={14} 
-                                  className={link.is_starred ? "fill-yellow-500 text-yellow-500" : "text-slate-500"} 
-                                />
-                              </button>
-                              {/* Fix: opacity-100 makes it permanently visible on mobile now */}
-                              <button 
-                                onClick={() => deleteLink(category.id, link.id)}
-                                className="p-1 rounded hover:bg-red-900/30 text-slate-500 hover:text-red-400 transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
+                            
+                            {/* Mirror Badges */}
+                            {link.mirrors && link.mirrors.map((m, i) => (
+                              <a key={m.id} href={m.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[10px] font-bold bg-slate-800 border border-slate-600 text-purple-300 px-1.5 py-0.5 rounded hover:bg-slate-700 shrink-0 transition-colors" title={`Mirror: ${m.url}`}>
+                                {i + 2} <span className={`w-1 h-1 rounded-full ${m.status === 'live' ? 'bg-green-500' : m.status === 'dead' ? 'bg-red-500' : 'bg-slate-500'}`}></span>
+                              </a>
+                            ))}
+                            
+                            <span className="text-[10px] text-slate-500 truncate max-w-full leading-none">
+                              ({link.url.replace(/^https?:\/\//, '')})
+                            </span>
                           </div>
-                          
-                          <p className="text-[10px] text-slate-500 mb-1.5 truncate">
-                            {link.url}
-                          </p>
-                          
-                          {link.description && (
-                            <p className="text-xs text-slate-400 line-clamp-2 mt-1 leading-relaxed">
-                              {link.description}
-                            </p>
-                          )}
-                        </div>
 
-                        <div className="mt-2 flex items-center gap-1.5 text-[10px]">
-                          <span className={`w-1.5 h-1.5 rounded-full ${
-                            link.status === 'live' ? 'bg-green-500' : 
-                            link.status === 'dead' ? 'bg-red-500' : 'bg-slate-500'
-                          }`}></span>
-                          <span className="text-slate-500 capitalize">
-                            {link.status === 'unknown' ? 'Unchecked' : link.status}
-                          </span>
+                          {/* Top Right Action Buttons */}
+                          <div className="flex items-center gap-0.5 absolute right-0 top-0 bg-slate-900/90 pl-1 rounded-bl">
+                            <button onClick={() => toggleStar(category.id, link.id)} className="p-1 rounded hover:bg-slate-800 transition-colors">
+                              <Star size={14} className={link.is_starred ? "fill-yellow-500 text-yellow-500" : "text-slate-500"} />
+                            </button>
+                            <button onClick={() => deleteLink(category.id, link.id)} className="p-1 rounded hover:bg-red-900/30 text-slate-500 hover:text-red-400 transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100">
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         </div>
+                        
+                        {link.description && <p className="text-xs text-slate-400 line-clamp-1 mt-1">{link.description}</p>}
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-slate-500 text-xs italic py-1">No links in this category yet.</p>
-                )}
+
+                      <div className="mt-2 flex items-center gap-1.5 text-[10px]">
+                        <span className={`w-1.5 h-1.5 rounded-full ${link.status === 'live' ? 'bg-green-500' : link.status === 'dead' ? 'bg-red-500' : 'bg-slate-500'}`}></span>
+                        <span className="text-slate-500 capitalize">{link.status === 'unknown' ? 'Unchecked' : link.status}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
