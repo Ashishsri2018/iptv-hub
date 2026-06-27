@@ -12,7 +12,6 @@ interface VideoEngineProps {
 const PROXY_WORKER_URL = "https://iptv-proxy.ashishsri2018.workers.dev/";
 
 export default function VideoEngine({ streamUrl }: VideoEngineProps) {
-  // Use 'any' cast temporarily to prevent TS errors if activeChannel/sources aren't in the store yet
   const store: any = useAppStore();
   const channelName = store.channelName;
   const settings = store.settings;
@@ -61,22 +60,12 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
   const userTouchedSubtitles = useRef(false);
 
-  // ==========================================
-  // THE METADATA RESOLUTION ENGINE (THE MERGE)
-  // ==========================================
   const resolvedMetadata = useMemo(() => {
     try {
-      // 1. Global (from settings table)
       const global = settings?.global_metadata ? JSON.parse(settings.global_metadata) : {};
-      
-      // 2. Playlist (from sources table)
       const source = sources.find((s: any) => s.id === activeChannel?.source_id);
       const playlist = source?.playlist_metadata ? JSON.parse(source.playlist_metadata) : {};
-      
-      // 3. Channel (from channels table raw_metadata)
       const channel = activeChannel?.raw_metadata ? JSON.parse(activeChannel.raw_metadata) : {};
-      
-      // Merge Cascade: Global is overwritten by Playlist, which is overwritten by Channel
       return { ...global, ...playlist, ...channel };
     } catch (e) {
       console.error("Metadata parsing error:", e);
@@ -84,10 +73,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     }
   }, [settings, sources, activeChannel]);
 
-  // Feed the winning metadata into the Cloudflare Proxy Config
   const proxyConfig = { 
     url: streamUrl, 
-    // Checks for common M3U header variations
     userAgent: resolvedMetadata['http-user-agent'] || resolvedMetadata['user-agent'] || resolvedMetadata['User-Agent'] || "VLC/3.0.0",
     referer: resolvedMetadata['http-referrer'] || resolvedMetadata['referer'] || resolvedMetadata['Referer'] || "",
     origin: resolvedMetadata['Origin'] || resolvedMetadata['origin'] || ""
@@ -219,7 +206,37 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       const isDirectMedia = !!streamUrl.match(/\.(mp4|mkv|webm|avi|mov|flv|wmv|ts)(\?|$)/i);
 
       if (Hls.isSupported() && !isDirectMedia) {
-        const hls = new Hls({ maxMaxBufferLength: 30 });
+        // IMPORTANT FIX: renderTextTracksNatively: false stops subtitles from bypassing the custom loader
+        const hlsConfig: any = { 
+          maxMaxBufferLength: 30,
+          renderTextTracksNatively: false 
+        };
+
+        // IMPORTANT FIX: The Interceptor. This catches video fragments (.ts) and subtitles (.vtt)
+        if (useProxy) {
+          const DefaultLoader: any = Hls.DefaultConfig.loader;
+          hlsConfig.loader = class ProxyLoader extends DefaultLoader {
+            constructor(config: any) {
+              super(config);
+              const originalLoad = this.load.bind(this);
+              this.load = (context: any, loadConfig: any, callbacks: any) => {
+                if (context.url && !context.url.startsWith(PROXY_WORKER_URL)) {
+                  const pConfig = { 
+                    url: context.url, 
+                    userAgent: proxyConfig.userAgent,
+                    referer: proxyConfig.referer,
+                    origin: proxyConfig.origin
+                  };
+                  const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(pConfig))));
+                  context.url = `${PROXY_WORKER_URL}?cfg=${encoded}`;
+                }
+                originalLoad(context, loadConfig, callbacks);
+              };
+            }
+          };
+        }
+
+        const hls = new Hls(hlsConfig);
         hlsRef.current = hls;
 
         hls.loadSource(activeStreamUrl);
@@ -288,14 +305,11 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         });
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event, data) => processSubtitles(data.subtitleTracks || []));
 
-        // FIX: Only trigger Error UI if the error is actually Fatal!
         hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!data.fatal) {
-            // Ignore non-fatal warnings completely (like levelSwitchError during Auto switch)
-            return;
-          }
+          if (!data.fatal) return; 
 
-          const parsedError = getHlsError(data);
+          // Passes useProxy state to the newly updated handler
+          const parsedError = getHlsError(data, useProxy);
           if (parsedError) {
             clearWatchdog();
             setIsBuffering(false);
@@ -344,7 +358,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     activeMenuRef.current = nextMenu;
   };
 
-  // STANDARD RETRY: Retries without changing the proxy state
   const handleRetryNormal = () => {
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
@@ -352,7 +365,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     setRetryCount(prev => prev + 1);
   };
 
-  // PROXY RETRY: Forces the proxy to trigger
   const handleRetryProxy = () => {
     setHasFatalError(false);
     setErrorUI({ title: '', desc: '', raw: '' });
@@ -543,7 +555,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       {hasFatalError && (
         <PlayerErrorUI 
           errorUI={errorUI}
-          onRetry={handleRetryNormal}       // Passes the new standard retry function
+          onRetry={handleRetryNormal}
           onRetryProxy={handleRetryProxy}
           onPlayExternalProxy={() => launchExternalPlayer(true)}
           onPlayExternalNative={() => launchExternalPlayer(false)}
