@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { useAppStore } from '../store';
 import VideoEngine from './VideoEngine';
@@ -6,19 +6,28 @@ import VideoEngine from './VideoEngine';
 export default function PlayerOverlay() {
   const { streamUrl, channelName, closePlayer } = useAppStore();
   const [isPipActive, setIsPipActive] = useState(false);
+  
+  // FIX: Prevents infinite History stack buildup on channel changes
+  const hasPushedHistory = useRef(false);
 
   useEffect(() => {
     if (!streamUrl) {
       setIsPipActive(false);
+      hasPushedHistory.current = false;
       return;
     }
 
-    // Hardware Back Button Integration
-    window.history.pushState({ playerOpen: true }, '');
+    if (!hasPushedHistory.current) {
+      window.history.pushState({ playerOpen: true }, '');
+      hasPushedHistory.current = true;
+    }
+
     const handlePopState = () => {
       setIsPipActive(false);
+      hasPushedHistory.current = false;
       closePlayer();
     };
+
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, [streamUrl, closePlayer]);

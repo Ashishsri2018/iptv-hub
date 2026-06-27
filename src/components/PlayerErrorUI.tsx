@@ -1,10 +1,10 @@
-import { useState, useRef } from 'react';
-import { AlertTriangle, ExternalLink, WifiOff, RefreshCw, ShieldAlert, CheckCircle2 } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { AlertTriangle, ExternalLink, WifiOff, RefreshCw, ShieldAlert, CheckCircle2, type LucideIcon } from 'lucide-react';
 import type { ErrorState } from '../utils/errorHandler';
 
 interface PlayerErrorUIProps {
   errorUI: ErrorState;
-  onRetry: () => void;        // Added standard Retry prop
+  onRetry: () => void;
   onRetryProxy: () => void;
   onPlayExternalProxy: () => void;
   onPlayExternalNative: () => void;
@@ -12,32 +12,38 @@ interface PlayerErrorUIProps {
   nativeUrl: string;
 }
 
-export default function PlayerErrorUI({ errorUI, onRetry, onRetryProxy, onPlayExternalProxy, onPlayExternalNative, proxyUrl, nativeUrl }: PlayerErrorUIProps) {
+// FIX: Custom hook prevents memory leaks, race conditions, and isolates timer logic
+const useLongPressCopy = () => {
   const [copiedFeedback, setCopiedFeedback] = useState<string | null>(null);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLongPress = useRef(false);
 
-  // Starts the 600ms timer when you touch the button
-  const handlePressStart = (url: string, label: string) => {
+  useEffect(() => {
+    return () => {
+      if (pressTimer.current) clearTimeout(pressTimer.current);
+    };
+  }, []);
+
+  const start = (text: string, label: string) => {
+    if (!text) return;
     isLongPress.current = false;
     pressTimer.current = setTimeout(() => {
       isLongPress.current = true;
-      navigator.clipboard.writeText(url).catch(() => {});
+      navigator.clipboard.writeText(text).catch(() => {});
       setCopiedFeedback(`Copied ${label}!`);
-      setTimeout(() => setCopiedFeedback(null), 2000); // Hide toast after 2 seconds
+      setTimeout(() => setCopiedFeedback(null), 2000); 
     }, 600);
   };
 
-  // Cancels the timer if you let go before 600ms
-  const handlePressEnd = () => {
+  const end = () => {
     if (pressTimer.current) {
       clearTimeout(pressTimer.current);
       pressTimer.current = null;
     }
   };
 
-  // Prevents the normal "click" action if you just finished a long-press
-  const handleClick = (action: () => void) => (e: React.MouseEvent) => {
+  // FIX: Proper TypeScript typing for the MouseEvent
+  const wrapClick = (action: () => void) => (e: React.MouseEvent<HTMLButtonElement>) => {
     if (isLongPress.current) {
       e.preventDefault();
       e.stopPropagation();
@@ -46,14 +52,43 @@ export default function PlayerErrorUI({ errorUI, onRetry, onRetryProxy, onPlayEx
     action();
   };
 
-  const openInNewTab = () => {
-    window.open(nativeUrl, '_blank', 'noopener,noreferrer');
-  };
+  return { copiedFeedback, start, end, wrapClick };
+};
+
+// FIX: Reusable button component drastically reduces HTML bloat and standardizes behavior
+interface ErrorActionButtonProps {
+  onClick: () => void;
+  onCopyStart: () => void;
+  onCopyEnd: () => void;
+  wrapClick: (fn: () => void) => (e: React.MouseEvent<HTMLButtonElement>) => void;
+  icon: LucideIcon;
+  label: string;
+  colorClass: string;
+}
+
+const ErrorActionButton = ({ onClick, onCopyStart, onCopyEnd, wrapClick, icon: Icon, label, colorClass }: ErrorActionButtonProps) => (
+  <button 
+    onClick={wrapClick(onClick)}
+    onPointerDown={onCopyStart}
+    onPointerUp={onCopyEnd}
+    onPointerLeave={onCopyEnd}
+    onContextMenu={(e) => e.preventDefault()}
+    className={`px-5 py-3 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 transition-all select-none touch-none ${colorClass}`}
+  >
+    <Icon size={18} /> {label}
+  </button>
+);
+
+export default function PlayerErrorUI({ errorUI, onRetry, onRetryProxy, onPlayExternalProxy, onPlayExternalNative, proxyUrl, nativeUrl }: PlayerErrorUIProps) {
+  const { copiedFeedback, start, end, wrapClick } = useLongPressCopy();
+
+  const openInNewTab = () => window.open(nativeUrl, '_blank', 'noopener,noreferrer');
+  
+  const isFatalBlock = errorUI.title.includes("Proxy Blocked") || errorUI.title.includes("Geo-Blocked");
 
   return (
     <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#0a0c10]/95 backdrop-blur-sm text-center p-6 animate-in fade-in duration-300">
       
-      {/* Toast Notification for Copy Success */}
       {copiedFeedback && (
         <div className="absolute top-10 bg-green-600/95 text-white px-5 py-2.5 rounded-full flex items-center gap-2 animate-in slide-in-from-top-4 fade-in duration-300 z-[60] shadow-[0_0_20px_rgba(22,163,74,0.4)]">
           <CheckCircle2 size={18} />
@@ -80,64 +115,60 @@ export default function PlayerErrorUI({ errorUI, onRetry, onRetryProxy, onPlayEx
       
       <div className="flex flex-col gap-3 w-full max-w-sm">
         
-        {/* CONDITIONAL BUTTON: Only shows for Mixed Content errors */}
         {errorUI.title.includes("Mixed Content") && (
-          <button 
-            onClick={handleClick(openInNewTab)}
-            onPointerDown={() => handlePressStart(nativeUrl, 'Original URL')}
-            onPointerUp={handlePressEnd}
-            onPointerLeave={handlePressEnd}
-            onContextMenu={(e) => e.preventDefault()}
-            className="px-5 py-3 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-teal-900/20 transition-all select-none touch-none"
-          >
-            <ExternalLink size={18} /> Open in New Tab
-          </button>
+          <ErrorActionButton
+            onClick={openInNewTab}
+            onCopyStart={() => start(nativeUrl, 'Original URL')}
+            onCopyEnd={end}
+            wrapClick={wrapClick}
+            icon={ExternalLink}
+            label="Open in New Tab"
+            colorClass="bg-teal-600 hover:bg-teal-700 shadow-lg shadow-teal-900/20"
+          />
         )}
 
-        {/* NEW BUTTON: Standard Retry */}
-        <button 
-          onClick={handleClick(onRetry)}
-          onPointerDown={() => handlePressStart(nativeUrl, 'Stream URL')}
-          onPointerUp={handlePressEnd}
-          onPointerLeave={handlePressEnd}
-          onContextMenu={(e) => e.preventDefault()}
-          className="px-5 py-3 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20 transition-all select-none touch-none"
-        >
-          <RefreshCw size={18} /> Retry Connection
-        </button>
+        {/* FIX: Hide normal retry if the provider actively blocks the current connection method */}
+        {!isFatalBlock && (
+          <ErrorActionButton
+            onClick={onRetry}
+            onCopyStart={() => start(errorUI.raw, 'Error Log')}
+            onCopyEnd={end}
+            wrapClick={wrapClick}
+            icon={RefreshCw}
+            label="Retry Connection"
+            colorClass="bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-900/20"
+          />
+        )}
 
-        <button 
-          onClick={handleClick(onRetryProxy)}
-          onPointerDown={() => handlePressStart(proxyUrl, 'Proxied URL')}
-          onPointerUp={handlePressEnd}
-          onPointerLeave={handlePressEnd}
-          onContextMenu={(e) => e.preventDefault()}
-          className="px-5 py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-indigo-900/20 transition-all select-none touch-none"
-        >
-          <RefreshCw size={18} /> Retry with Proxy
-        </button>
+        <ErrorActionButton
+          onClick={onRetryProxy}
+          onCopyStart={() => start(errorUI.raw, 'Error Log')}
+          onCopyEnd={end}
+          wrapClick={wrapClick}
+          icon={RefreshCw}
+          label="Retry with Proxy"
+          colorClass="bg-indigo-600 hover:bg-indigo-700 shadow-lg shadow-indigo-900/20"
+        />
 
-        <button 
-          onClick={handleClick(onPlayExternalProxy)}
-          onPointerDown={() => handlePressStart(proxyUrl, 'Proxied URL')}
-          onPointerUp={handlePressEnd}
-          onPointerLeave={handlePressEnd}
-          onContextMenu={(e) => e.preventDefault()}
-          className="px-5 py-3 bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 transition-all select-none touch-none"
-        >
-          <ExternalLink size={18} /> Play External (with Proxy)
-        </button>
+        <ErrorActionButton
+          onClick={onPlayExternalProxy}
+          onCopyStart={() => start(proxyUrl, 'Proxied URL')}
+          onCopyEnd={end}
+          wrapClick={wrapClick}
+          icon={ExternalLink}
+          label="Play External (with Proxy)"
+          colorClass="bg-purple-600 hover:bg-purple-700"
+        />
 
-        <button 
-          onClick={handleClick(onPlayExternalNative)}
-          onPointerDown={() => handlePressStart(nativeUrl, 'Original URL')}
-          onPointerUp={handlePressEnd}
-          onPointerLeave={handlePressEnd}
-          onContextMenu={(e) => e.preventDefault()}
-          className="px-5 py-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white text-sm font-semibold rounded-lg flex items-center justify-center gap-2 transition-all shadow-[0_0_15px_rgba(255,255,255,0.1)] select-none touch-none"
-        >
-          <ExternalLink size={18} /> Play External (without Proxy)
-        </button>
+        <ErrorActionButton
+          onClick={onPlayExternalNative}
+          onCopyStart={() => start(nativeUrl, 'Original URL')}
+          onCopyEnd={end}
+          wrapClick={wrapClick}
+          icon={ExternalLink}
+          label="Play External (without Proxy)"
+          colorClass="bg-slate-700 hover:bg-slate-600 border border-slate-600 shadow-[0_0_15px_rgba(255,255,255,0.1)]"
+        />
       </div>
     </div>
   );

@@ -9,14 +9,18 @@ interface VideoEngineProps {
   streamUrl: string;
 }
 
-const PROXY_WORKER_URL = "https://iptv-proxy.ashishsri2018.workers.dev/";
+// FIX: Bulletproof Vite env check using optional chaining
+const PROXY_WORKER_URL = import.meta?.env?.VITE_PROXY_WORKER_URL || "https://iptv-proxy.ashishsri2018.workers.dev/";
+
+// FIX: Module-level constant prevents memory allocation loops in Zustand selectors
+const EMPTY_ARRAY: any[] = [];
 
 export default function VideoEngine({ streamUrl }: VideoEngineProps) {
-  const store: any = useAppStore();
-  const channelName = store.channelName;
-  const settings = store.settings;
-  const activeChannel = store.activeChannel;
-  const sources = store.sources || [];
+  const channelName = useAppStore((s: any) => s.channelName);
+  const settings = useAppStore((s: any) => s.settings);
+  const activeChannel = useAppStore((s: any) => s.activeChannel);
+  // FIX: Uses the stable EMPTY_ARRAY reference
+  const sources = useAppStore((s: any) => s.sources || EMPTY_ARRAY); 
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -25,18 +29,27 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
   const [useProxy, setUseProxy] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  
+  // FIX: PiP support detection
+  const [isPiPSupported, setIsPiPSupported] = useState(false);
   
   const [volume, setVolume] = useState(() => {
-    const saved = localStorage.getItem('iptv_volume');
-    if (saved === null) return 1;
-    const parsed = parseFloat(saved);
-    return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 1;
+    try {
+      const saved = localStorage.getItem('iptv_volume');
+      if (saved === null) return 1;
+      const parsed = parseFloat(saved);
+      return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 1;
+    } catch { return 1; }
   });
-  const [isMuted, setIsMuted] = useState(() => localStorage.getItem('iptv_muted') === 'true');
+  
+  const [isMuted, setIsMuted] = useState(() => {
+    try { return localStorage.getItem('iptv_muted') === 'true'; } 
+    catch { return false; }
+  });
   
   const [hasFatalError, setHasFatalError] = useState(false);
   const [errorUI, setErrorUI] = useState<ErrorState>({ title: '', desc: '', raw: '' });
-  const [retryCount, setRetryCount] = useState(0);
   
   const [progress, setProgress] = useState(0);
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState("00:00");
@@ -60,17 +73,47 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
   const userTouchedSubtitles = useRef(false);
 
+  // FIX: Single Source of Truth for resetting the UI state
+  const resetUIState = () => {
+    setIsBuffering(true);
+    setProgress(0);
+    setCurrentTimeDisplay("00:00");
+    setDurationDisplay("00:00");
+    setIsLive(true);
+    setHasFatalError(false);
+    setErrorUI({ title: '', desc: '', raw: '' });
+    setActiveMenu(null);
+    activeMenuRef.current = null;
+    setAutoLevel(-1);
+    setLevels([]);
+    setAudioTracks([]);
+    setSubtitleTracks([]);
+    userTouchedSubtitles.current = false;
+  };
+
+  const [currentUrl, setCurrentUrl] = useState(streamUrl);
+  if (streamUrl !== currentUrl) {
+    setCurrentUrl(streamUrl);
+    setUseProxy(false);
+    setRetryCount(0);
+    resetUIState(); // Call reset on channel change
+  }
+
   const resolvedMetadata = useMemo(() => {
-    try {
-      const global = settings?.global_metadata ? JSON.parse(settings.global_metadata) : {};
+    let global = {}, playlist = {}, channel = {};
+    
+    try { if (settings?.global_metadata) global = JSON.parse(settings.global_metadata); } 
+    catch (e) { console.warn("Global metadata parse error"); }
+    
+    try { 
       const source = sources.find((s: any) => s.id === activeChannel?.source_id);
-      const playlist = source?.playlist_metadata ? JSON.parse(source.playlist_metadata) : {};
-      const channel = activeChannel?.raw_metadata ? JSON.parse(activeChannel.raw_metadata) : {};
-      return { ...global, ...playlist, ...channel };
-    } catch (e) {
-      console.error("Metadata parsing error:", e);
-      return {};
-    }
+      if (source?.playlist_metadata) playlist = JSON.parse(source.playlist_metadata);
+    } catch (e) { console.warn("Playlist metadata parse error"); }
+    
+    try { if (activeChannel?.raw_metadata) channel = JSON.parse(activeChannel.raw_metadata); } 
+    catch (e) { console.warn("Channel metadata parse error"); }
+    
+    return { ...global, ...playlist, ...channel };
   }, [settings, sources, activeChannel]);
 
   const proxyConfig = { 
@@ -92,11 +135,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   };
 
   useEffect(() => {
-    setRetryCount(0);
-    setUseProxy(false);
-  }, [streamUrl]);
-
-  useEffect(() => {
+    setIsPiPSupported(document.pictureInPictureEnabled || false);
+    
     const handleOffline = () => {
       setErrorUI({ title: "Connection Lost", desc: "Your internet connection dropped. Please check your Wi-Fi or cellular data.", raw: "ERR_INTERNET_DISCONNECTED" });
       setHasFatalError(true);
@@ -107,19 +147,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   }, []);
 
   useEffect(() => {
-    const abortController = new AbortController();
     let isMounted = true;
     let watchdogTimer: ReturnType<typeof setTimeout>;
-    
-    setHasFatalError(false);
-    setErrorUI({ title: '', desc: '', raw: '' });
-    setActiveMenu(null);
-    setAutoLevel(-1);
-    setLevels([]);
-    setAudioTracks([]);
-    setSubtitleTracks([]);
-    activeMenuRef.current = null;
-    userTouchedSubtitles.current = false; 
     
     if (containerRef.current) {
       containerRef.current.style.opacity = '1';
@@ -206,13 +235,11 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       const isDirectMedia = !!streamUrl.match(/\.(mp4|mkv|webm|avi|mov|flv|wmv|ts)(\?|$)/i);
 
       if (Hls.isSupported() && !isDirectMedia) {
-        // IMPORTANT FIX: renderTextTracksNatively: false stops subtitles from bypassing the custom loader
         const hlsConfig: any = { 
           maxMaxBufferLength: 30,
           renderTextTracksNatively: false 
         };
 
-        // IMPORTANT FIX: The Interceptor. This catches video fragments (.ts) and subtitles (.vtt)
         if (useProxy) {
           const DefaultLoader: any = Hls.DefaultConfig.loader;
           hlsConfig.loader = class ProxyLoader extends DefaultLoader {
@@ -287,7 +314,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
           }
           if (hls.subtitleTracks && hls.subtitleTracks.length > 0) processSubtitles(hls.subtitleTracks);
           setIsBuffering(false);
-          video.play().catch(() => setIsPlaying(false));
         });
 
         hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => setAutoLevel(data.level));
@@ -307,8 +333,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return; 
-
-          // Passes useProxy state to the newly updated handler
           const parsedError = getHlsError(data, useProxy);
           if (parsedError) {
             clearWatchdog();
@@ -331,7 +355,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     return () => {
       isMounted = false;
       clearWatchdog();
-      abortController.abort();
       if (hlsRef.current) {
         hlsRef.current.stopLoad(); 
         hlsRef.current.detachMedia();
@@ -359,16 +382,12 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   };
 
   const handleRetryNormal = () => {
-    setHasFatalError(false);
-    setErrorUI({ title: '', desc: '', raw: '' });
-    setIsBuffering(true);
+    resetUIState(); // FIX: Clear stale UI state on retry
     setRetryCount(prev => prev + 1);
   };
 
   const handleRetryProxy = () => {
-    setHasFatalError(false);
-    setErrorUI({ title: '', desc: '', raw: '' });
-    setIsBuffering(true);
+    resetUIState(); // FIX: Clear stale UI state on proxy retry
     setUseProxy(true);
     setRetryCount(prev => prev + 1);
   };
@@ -429,13 +448,18 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setVolume(val);
-    localStorage.setItem('iptv_volume', val.toString());
+    try { localStorage.setItem('iptv_volume', val.toString()); } catch {}
     if (videoRef.current) {
       videoRef.current.volume = val;
       const willMute = val === 0;
       videoRef.current.muted = willMute;
-      if (!willMute && isMuted) { setIsMuted(false); localStorage.setItem('iptv_muted', 'false'); }
-      else if (willMute && !isMuted) { setIsMuted(true); localStorage.setItem('iptv_muted', 'true'); }
+      if (!willMute && isMuted) { 
+        setIsMuted(false); 
+        try { localStorage.setItem('iptv_muted', 'false'); } catch {} 
+      } else if (willMute && !isMuted) { 
+        setIsMuted(true); 
+        try { localStorage.setItem('iptv_muted', 'true'); } catch {} 
+      }
     }
   };
 
@@ -444,13 +468,13 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       const nextMuted = !videoRef.current.muted;
       videoRef.current.muted = nextMuted;
       setIsMuted(nextMuted);
-      localStorage.setItem('iptv_muted', nextMuted.toString());
+      try { localStorage.setItem('iptv_muted', nextMuted.toString()); } catch {}
       if (!nextMuted) {
         let restoredVolume = volume;
         if (restoredVolume === 0) restoredVolume = 0.5;
         setVolume(restoredVolume);
         videoRef.current.volume = restoredVolume;
-        localStorage.setItem('iptv_volume', restoredVolume.toString());
+        try { localStorage.setItem('iptv_volume', restoredVolume.toString()); } catch {}
       }
     }
   };
@@ -496,26 +520,22 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     try {
       if (document.pictureInPictureElement) await document.exitPictureInPicture();
       else if (document.pictureInPictureEnabled && videoRef.current) await videoRef.current.requestPictureInPicture();
-      else alert("Picture-in-Picture is not natively supported or is disabled in your current browser.");
     } catch (error) { console.warn("PiP Error:", error); }
   };
 
   const launchExternalPlayer = (forceProxy: boolean = false) => {
     try {
       const isAndroid = /Android/i.test(navigator.userAgent);
-      
       let targetUrl = streamUrl;
-      if (forceProxy) {
-        targetUrl = computedProxyUrl;
-      }
+      if (forceProxy) targetUrl = computedProxyUrl;
       
       if (isAndroid) {
         const match = targetUrl.match(/^([a-zA-Z0-9]+):\/\/(.*)$/);
         if (match) {
           const scheme = match[1];
-          const path = match[2];
+          const safePath = match[2].replace(/;/g, '%3B').replace(/#/g, '%23');
           const safeName = channelName || 'Live Channel';
-          targetUrl = `intent://${path}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(safeName)};end;`;
+          targetUrl = `intent://${safePath}#Intent;scheme=${scheme};action=android.intent.action.VIEW;type=video/*;S.title=${encodeURIComponent(safeName)};end;`;
         }
       } else targetUrl = `vlc://${targetUrl}`;
       window.location.href = targetUrl;
@@ -572,15 +592,15 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
           <div className="flex items-center justify-between pointer-events-auto">
             <div className="flex items-center gap-4 sm:gap-6">
-              <button onClick={togglePlay} className="text-white hover:text-blue-400 transition-colors">
+              <button onClick={togglePlay} aria-label={isPlaying ? "Pause" : "Play"} className="text-white hover:text-blue-400 transition-colors">
                 {isPlaying ? <Pause size={24} className="fill-current" /> : <Play size={24} className="fill-current" />}
               </button>
               <div className="flex items-center gap-2 group/volume">
-                <button onClick={toggleMute} className="text-white hover:text-blue-400 transition-colors">
+                <button onClick={toggleMute} aria-label={isMuted ? "Unmute" : "Mute"} className="text-white hover:text-blue-400 transition-colors">
                   {isMuted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
                 </button>
                 <input 
-                  type="range" min="0" max="1" step="0.05" value={isMuted ? 0 : volume} onChange={handleVolumeChange}
+                  type="range" min="0" max="1" step="0.05" value={isMuted ? 0 : volume} onChange={handleVolumeChange} aria-label="Volume"
                   className="w-0 sm:w-20 opacity-0 sm:opacity-100 group-hover/volume:w-20 group-hover/volume:opacity-100 transition-all accent-blue-500 h-1 cursor-pointer"
                 />
               </div>
@@ -599,7 +619,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
             <div className="flex items-center gap-4 sm:gap-5 relative">
               {subtitleTracks.length > 0 && (
                 <div className="relative">
-                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('subtitles'); }} className={`transition-colors ${activeMenu === 'subtitles' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
+                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('subtitles'); }} aria-label="Subtitles" className={`transition-colors ${activeMenu === 'subtitles' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
                     <Subtitles size={20} />
                   </button>
                   {activeMenu === 'subtitles' && (
@@ -620,7 +640,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
               {audioTracks.length > 1 && (
                 <div className="relative">
-                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('audio'); }} className={`transition-colors ${activeMenu === 'audio' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
+                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('audio'); }} aria-label="Audio Tracks" className={`transition-colors ${activeMenu === 'audio' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
                     <AudioLines size={20} />
                   </button>
                   {activeMenu === 'audio' && (
@@ -638,7 +658,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
               {levels.length > 0 && (
                 <div className="relative">
-                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('quality'); }} className={`transition-colors ${activeMenu === 'quality' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
+                  <button onClick={(e) => { e.stopPropagation(); toggleMenu('quality'); }} aria-label="Quality Settings" className={`transition-colors ${activeMenu === 'quality' ? 'text-blue-400' : 'text-white hover:text-blue-400'}`}>
                     <Settings2 size={20} />
                   </button>
                   {activeMenu === 'quality' && (
@@ -658,8 +678,14 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
                 </div>
               )}
 
-              <button onClick={togglePiP} className="text-white hover:text-blue-400 transition-colors"><PictureInPicture size={20} /></button>
-              <button onClick={toggleFullScreen} className="text-white hover:text-blue-400 transition-colors"><Maximize size={20} /></button>
+              {/* FIX: Only render PiP button if the browser actually supports it */}
+              {isPiPSupported && (
+                <button onClick={togglePiP} aria-label="Picture in Picture" className="text-white hover:text-blue-400 transition-colors">
+                  <PictureInPicture size={20} />
+                </button>
+              )}
+              
+              <button onClick={toggleFullScreen} aria-label="Full Screen" className="text-white hover:text-blue-400 transition-colors"><Maximize size={20} /></button>
             </div>
           </div>
         </div>
