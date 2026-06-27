@@ -27,7 +27,6 @@ const bytesToBase64 = (bytes: Uint8Array) => {
 };
 
 export default function VideoEngine({ streamUrl }: VideoEngineProps) {
-  // FIX: Added 'any' typing back to bypass strict AppState missing property errors
   const channelName = useAppStore((s: any) => s.channelName);
   const settings = useAppStore((s: any) => s.settings);
   const activeChannel = useAppStore((s: any) => s.activeChannel);
@@ -135,7 +134,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     resetUIState();
   }, [streamUrl, resetUIState]);
 
-  // FIX: Added Record<string, any> typing to satisfy TypeScript indexing rules
   const resolvedMetadata = useMemo(() => {
     let global: Record<string, any> = {};
     let playlist: Record<string, any> = {};
@@ -164,7 +162,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const computedProxyUrl = useMemo(() => {
     try {
       const bytes = new TextEncoder().encode(JSON.stringify(proxyConfig));
-      return `${PROXY_WORKER_URL}?cfg=${bytesToBase64(bytes)}`;
+      // FIX: encodeURIComponent is absolutely mandatory here to prevent Server 400 crashes
+      return `${PROXY_WORKER_URL}?cfg=${encodeURIComponent(bytesToBase64(bytes))}`;
     } catch (e) {
       if (import.meta.env?.DEV) console.warn("Proxy Config Encoding Error:", e);
       return streamUrl;
@@ -296,7 +295,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
                       origin: proxyConfigRef.current.origin
                     };
                     const bytes = new TextEncoder().encode(JSON.stringify(pConfig));
-                    context.url = `${PROXY_WORKER_URL}?cfg=${bytesToBase64(bytes)}`;
+                    // FIX: encodeURIComponent is mandatory here
+                    context.url = `${PROXY_WORKER_URL}?cfg=${encodeURIComponent(bytesToBase64(bytes))}`;
                     
                     const wrappedCallbacks = {
                       ...callbacks,
@@ -324,6 +324,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
                     originalLoad(context, loadConfig, wrappedCallbacks);
                     return;
                   } catch (e) { 
+                    if (import.meta.env?.DEV) console.error("Proxy Loader Wrapping Failed:", e);
                     context.url = originalUrl; 
                   }
                 }
@@ -686,7 +687,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     } catch (error: any) { if (import.meta.env?.DEV) console.error("External Player Launch Error:", error); }
   };
 
-  // Helper to smartly determine what to call the quality level
   const getLevelLabel = (level: Level | undefined, idx: number) => {
     if (!level) return '';
     if (level.height) return `${level.height}p`;
