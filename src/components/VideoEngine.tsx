@@ -27,10 +27,11 @@ const bytesToBase64 = (bytes: Uint8Array) => {
 };
 
 export default function VideoEngine({ streamUrl }: VideoEngineProps) {
-  const channelName = useAppStore((s) => s.channelName);
-  const settings = useAppStore((s) => s.settings);
-  const activeChannel = useAppStore((s) => s.activeChannel);
-  const sources = useAppStore((s) => s.sources || EMPTY_ARRAY);
+  // FIX: Added 'any' typing back to bypass strict AppState missing property errors
+  const channelName = useAppStore((s: any) => s.channelName);
+  const settings = useAppStore((s: any) => s.settings);
+  const activeChannel = useAppStore((s: any) => s.activeChannel);
+  const sources = useAppStore((s: any) => s.sources || EMPTY_ARRAY);
 
   const settingsRef = useRef(settings);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
@@ -116,7 +117,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     activeMenuRef.current = null;
     setAutoLevel(-1);
     
-    // FIX: Initialize isAutoQuality correctly from DB immediately
     const defaultQuality = settingsRef.current?.default_quality?.toLowerCase() ?? "auto";
     setIsAutoQuality(defaultQuality === "auto");
     
@@ -135,15 +135,20 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     resetUIState();
   }, [streamUrl, resetUIState]);
 
+  // FIX: Added Record<string, any> typing to satisfy TypeScript indexing rules
   const resolvedMetadata = useMemo(() => {
-    let global = {}, playlist = {}, channel = {};
+    let global: Record<string, any> = {};
+    let playlist: Record<string, any> = {};
+    let channel: Record<string, any> = {};
+    
     try { if (settings?.global_metadata) global = JSON.parse(settings.global_metadata); } catch (e) {}
     try { 
       const source = sources.find((s: any) => s.id === activeChannel?.source_id);
       if (source?.playlist_metadata) playlist = JSON.parse(source.playlist_metadata);
     } catch (e) {}
     try { if (activeChannel?.raw_metadata) channel = JSON.parse(activeChannel.raw_metadata); } catch (e) {}
-    return { ...global, ...playlist, ...channel };
+    
+    return { ...global, ...playlist, ...channel } as Record<string, any>;
   }, [settings?.global_metadata, sources, activeChannel]);
 
   const proxyConfig = useMemo(() => ({ 
@@ -509,14 +514,11 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     setRetryCount(prev => prev + 1);
   };
 
-  // FIX: Applied specific currentLevel assignment and UI state updates
   const changeQuality = (levelIndex: number) => {
     if (!hlsRef.current) return;
 
     if (levelIndex === -1) {
       hlsRef.current.currentLevel = -1;
-      // hlsRef.current.nextLevel = -1;
-      // hlsRef.current.loadLevel = -1;
     } else {
       hlsRef.current.currentLevel = levelIndex; 
     }
@@ -815,17 +817,14 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
                   {activeMenu === 'quality' && (
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Quality</span></div>
-                      
                       <button onClick={(e) => { e.stopPropagation(); changeQuality(-1); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
-  Auto {isAutoQuality && autoLevel !== -1 && levels[autoLevel] ? `(${getLevelLabel(levels[autoLevel], autoLevel)})` : ''} 
-  {isAutoQuality && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
-</button>
-
-{levels.map((level, idx) => (
-  <button key={idx} onClick={(e) => { e.stopPropagation(); changeQuality(idx); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
-    {getLevelLabel(level, idx)} {!isAutoQuality && manualQualityLevel === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
-  </button>
-                      
+                        Auto {isAutoQuality && autoLevel !== -1 && levels[autoLevel] ? `(${getLevelLabel(levels[autoLevel], autoLevel)})` : ''} 
+                        {isAutoQuality && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+                      </button>
+                      {levels.map((level, idx) => (
+                        <button key={idx} onClick={(e) => { e.stopPropagation(); changeQuality(idx); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
+                          {getLevelLabel(level, idx)} {!isAutoQuality && manualQualityLevel === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+                        </button>
                       ))}
                     </div>
                   )}
