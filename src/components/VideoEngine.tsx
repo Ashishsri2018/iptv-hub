@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
-import Hls from 'hls.js';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import Hls, { type Level } from 'hls.js';
 import { Loader2, Play, Pause, Volume2, VolumeX, Maximize, PictureInPicture, Settings2, Check, AudioLines, Subtitles } from 'lucide-react';
 import { useAppStore } from '../store';
 import PlayerErrorUI from './PlayerErrorUI';
@@ -9,29 +9,46 @@ interface VideoEngineProps {
   streamUrl: string;
 }
 
-// FIX: Bulletproof Vite env check using optional chaining
-const PROXY_WORKER_URL = import.meta?.env?.VITE_PROXY_WORKER_URL || "https://iptv-proxy.ashishsri2018.workers.dev/";
+interface MediaTrack {
+  name?: string;
+  lang?: string;
+  [key: string]: any;
+}
 
-// FIX: Module-level constant prevents memory allocation loops in Zustand selectors
-const EMPTY_ARRAY: any[] = [];
+const PROXY_WORKER_URL = import.meta?.env?.VITE_PROXY_WORKER_URL || "https://iptv-proxy.ashishsri2018.workers.dev/";
+const EMPTY_ARRAY: readonly never[] = []; 
+
+const bytesToBase64 = (bytes: Uint8Array) => {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+};
 
 export default function VideoEngine({ streamUrl }: VideoEngineProps) {
-  const channelName = useAppStore((s: any) => s.channelName);
-  const settings = useAppStore((s: any) => s.settings);
-  const activeChannel = useAppStore((s: any) => s.activeChannel);
-  // FIX: Uses the stable EMPTY_ARRAY reference
-  const sources = useAppStore((s: any) => s.sources || EMPTY_ARRAY); 
+  const channelName = useAppStore((s) => s.channelName);
+  const settings = useAppStore((s) => s.settings);
+  const activeChannel = useAppStore((s) => s.activeChannel);
+  const sources = useAppStore((s) => s.sources || EMPTY_ARRAY);
+
+  const settingsRef = useRef(settings);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  
+  const isMounted = useRef(true);
+  const isRetrying = useRef(false);
+  const lastTimeRef = useRef(-1); 
+  const lastDurationRef = useRef(-1);
+  const lastVolumeRef = useRef(1); 
 
   const [isBuffering, setIsBuffering] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
   const [useProxy, setUseProxy] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  
-  // FIX: PiP support detection
   const [isPiPSupported, setIsPiPSupported] = useState(false);
   
   const [volume, setVolume] = useState(() => {
@@ -39,7 +56,9 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       const saved = localStorage.getItem('iptv_volume');
       if (saved === null) return 1;
       const parsed = parseFloat(saved);
-      return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 1;
+      const finalVol = Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : 1;
+      lastVolumeRef.current = finalVol > 0 ? finalVol : 0.5;
+      return finalVol;
     } catch { return 1; }
   });
   
@@ -62,19 +81,30 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const [activeMenu, setActiveMenu] = useState<'quality' | 'audio' | 'subtitles' | null>(null);
   const activeMenuRef = useRef<'quality' | 'audio' | 'subtitles' | null>(null);
 
-  const [levels, setLevels] = useState<any[]>([]);
-  const [currentLevel, setCurrentLevel] = useState<number>(-1);
+  const [levels, setLevels] = useState<Level[]>([]);
+  const [manualQualityLevel, setManualQualityLevel] = useState<number>(-1);
   const [autoLevel, setAutoLevel] = useState<number>(-1); 
+  const [isAutoQuality, setIsAutoQuality] = useState(true);
 
-  const [audioTracks, setAudioTracks] = useState<any[]>([]);
+  const [audioTracks, setAudioTracks] = useState<MediaTrack[]>([]);
   const [currentAudioTrack, setCurrentAudioTrack] = useState<number>(-1);
 
-  const [subtitleTracks, setSubtitleTracks] = useState<any[]>([]);
+  const [subtitleTracks, setSubtitleTracks] = useState<MediaTrack[]>([]);
   const [currentSubtitleTrack, setCurrentSubtitleTrack] = useState<number>(-1);
+  
   const userTouchedSubtitles = useRef(false);
+  const userTouchedAudio = useRef(false);
 
-  // FIX: Single Source of Truth for resetting the UI state
-  const resetUIState = () => {
+  const formatTime = useCallback((seconds: number) => {
+    if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "00:00";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  }, []);
+
+  const resetUIState = useCallback(() => {
     setIsBuffering(true);
     setProgress(0);
     setCurrentTimeDisplay("00:00");
@@ -85,57 +115,64 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     setActiveMenu(null);
     activeMenuRef.current = null;
     setAutoLevel(-1);
+    
+    // FIX: Initialize isAutoQuality correctly from DB immediately
+    const defaultQuality = settingsRef.current?.default_quality?.toLowerCase() ?? "auto";
+    setIsAutoQuality(defaultQuality === "auto");
+    
     setLevels([]);
     setAudioTracks([]);
     setSubtitleTracks([]);
     userTouchedSubtitles.current = false;
-  };
+    userTouchedAudio.current = false;
+    lastTimeRef.current = -1;
+    lastDurationRef.current = -1;
+  }, []);
 
-  const [currentUrl, setCurrentUrl] = useState(streamUrl);
-  if (streamUrl !== currentUrl) {
-    setCurrentUrl(streamUrl);
+  useEffect(() => {
     setUseProxy(false);
     setRetryCount(0);
-    resetUIState(); // Call reset on channel change
-  }
+    resetUIState();
+  }, [streamUrl, resetUIState]);
 
   const resolvedMetadata = useMemo(() => {
     let global = {}, playlist = {}, channel = {};
-    
-    try { if (settings?.global_metadata) global = JSON.parse(settings.global_metadata); } 
-    catch (e) { console.warn("Global metadata parse error"); }
-    
+    try { if (settings?.global_metadata) global = JSON.parse(settings.global_metadata); } catch (e) {}
     try { 
       const source = sources.find((s: any) => s.id === activeChannel?.source_id);
       if (source?.playlist_metadata) playlist = JSON.parse(source.playlist_metadata);
-    } catch (e) { console.warn("Playlist metadata parse error"); }
-    
-    try { if (activeChannel?.raw_metadata) channel = JSON.parse(activeChannel.raw_metadata); } 
-    catch (e) { console.warn("Channel metadata parse error"); }
-    
+    } catch (e) {}
+    try { if (activeChannel?.raw_metadata) channel = JSON.parse(activeChannel.raw_metadata); } catch (e) {}
     return { ...global, ...playlist, ...channel };
-  }, [settings, sources, activeChannel]);
+  }, [settings?.global_metadata, sources, activeChannel]);
 
-  const proxyConfig = { 
+  const proxyConfig = useMemo(() => ({ 
     url: streamUrl, 
-    userAgent: resolvedMetadata['http-user-agent'] || resolvedMetadata['user-agent'] || resolvedMetadata['User-Agent'] || "VLC/3.0.0",
+    userAgent: resolvedMetadata['http-user-agent'] || resolvedMetadata['user-agent'] || resolvedMetadata['User-Agent'] || "",
     referer: resolvedMetadata['http-referrer'] || resolvedMetadata['referer'] || resolvedMetadata['Referer'] || "",
     origin: resolvedMetadata['Origin'] || resolvedMetadata['origin'] || ""
-  };
-  const proxyEncoded = btoa(unescape(encodeURIComponent(JSON.stringify(proxyConfig))));
-  const computedProxyUrl = `${PROXY_WORKER_URL}?cfg=${proxyEncoded}`;
+  }), [streamUrl, resolvedMetadata]);
 
-  const formatTime = (seconds: number) => {
-    if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "00:00";
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
+  const proxyConfigRef = useRef(proxyConfig);
+  useEffect(() => { proxyConfigRef.current = proxyConfig; }, [proxyConfig]);
+
+  const computedProxyUrl = useMemo(() => {
+    try {
+      const bytes = new TextEncoder().encode(JSON.stringify(proxyConfig));
+      return `${PROXY_WORKER_URL}?cfg=${bytesToBase64(bytes)}`;
+    } catch (e) {
+      if (import.meta.env?.DEV) console.warn("Proxy Config Encoding Error:", e);
+      return streamUrl;
+    }
+  }, [proxyConfig, streamUrl]);
 
   useEffect(() => {
-    setIsPiPSupported(document.pictureInPictureEnabled || false);
+    isMounted.current = true;
+    const checkPiP = () => {
+      const video = videoRef.current;
+      setIsPiPSupported(!!document.pictureInPictureEnabled && !(video && (video as any).disablePictureInPicture));
+    };
+    checkPiP();
     
     const handleOffline = () => {
       setErrorUI({ title: "Connection Lost", desc: "Your internet connection dropped. Please check your Wi-Fi or cellular data.", raw: "ERR_INTERNET_DISCONNECTED" });
@@ -143,18 +180,14 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       setIsBuffering(false);
     };
     window.addEventListener('offline', handleOffline);
-    return () => window.removeEventListener('offline', handleOffline);
+    return () => {
+      isMounted.current = false;
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
   useEffect(() => {
-    let isMounted = true;
     let watchdogTimer: ReturnType<typeof setTimeout>;
-    
-    if (containerRef.current) {
-      containerRef.current.style.opacity = '1';
-      containerRef.current.style.display = '';
-    }
-
     const video = videoRef.current;
     if (!video) return;
 
@@ -165,29 +198,32 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       if (watchdogTimer) clearTimeout(watchdogTimer);
     };
 
-    watchdogTimer = setTimeout(() => {
-      if (isMounted && videoRef.current && (videoRef.current.readyState < 3 || videoRef.current.paused)) {
-        setErrorUI({ title: "Stream Timeout", desc: "The stream is stuck loading or is dead.", raw: "ERR_STUCK_OR_TIMEOUT" });
-        setHasFatalError(true);
-        setIsBuffering(false);
-        if (hlsRef.current) hlsRef.current.destroy();
-      }
-    }, 15000);
+    const startWatchdog = () => {
+      clearWatchdog();
+      watchdogTimer = setTimeout(() => {
+        if (videoRef.current && (videoRef.current.readyState < 3 || videoRef.current.paused)) {
+          setErrorUI({ title: "Stream Timeout", desc: "The stream is stuck loading or is dead.", raw: "ERR_STUCK_OR_TIMEOUT" });
+          setHasFatalError(true);
+          setIsBuffering(false);
+          if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+        }
+      }, 30000);
+    };
+    
+    startWatchdog();
 
     const handleNativePlay = () => setIsPlaying(true);
     const handleNativePause = () => setIsPlaying(false);
     const handleNativeWaiting = () => setIsBuffering(true);
-    const handleNativePlaying = () => {
-      clearWatchdog();
-      setIsBuffering(false);
-    };
     
+    const handleNativePlaying = () => { clearWatchdog(); setIsBuffering(false); };
+    const handleNativeProgress = () => { if (isBuffering) startWatchdog(); };
+    const handleNativeLoadedData = () => { clearWatchdog(); setIsBuffering(false); };
+
     const handleEnterPip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: true }));
     const handleLeavePip = () => window.dispatchEvent(new CustomEvent('pip-status', { detail: false }));
 
     const handleNativeMeta = () => {
-      clearWatchdog();
-      setIsBuffering(false);
       video.play().catch(() => setIsPlaying(false));
     };
     
@@ -202,6 +238,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     video.addEventListener('pause', handleNativePause);
     video.addEventListener('waiting', handleNativeWaiting);
     video.addEventListener('playing', handleNativePlaying);
+    video.addEventListener('progress', handleNativeProgress);
+    video.addEventListener('loadeddata', handleNativeLoadedData);
     video.addEventListener('enterpictureinpicture', handleEnterPip);
     video.addEventListener('leavepictureinpicture', handleLeavePip);
     video.addEventListener('loadedmetadata', handleNativeMeta);
@@ -209,10 +247,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
     const initializePlayer = () => {
       let activeStreamUrl = streamUrl;
-      
-      if (useProxy) {
-        activeStreamUrl = computedProxyUrl;
-      }
+      if (useProxy) activeStreamUrl = computedProxyUrl;
 
       if (window.location.protocol === 'https:' && activeStreamUrl.startsWith('http://')) {
         clearWatchdog();
@@ -230,116 +265,188 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         return;
       }
 
-      if (!isMounted) return;
-
-      const isDirectMedia = !!streamUrl.match(/\.(mp4|mkv|webm|avi|mov|flv|wmv|ts)(\?|$)/i);
+      const isDirectMedia = !!streamUrl.match(/\.(mp4|mkv|webm|avi|mov|flv|wmv|ts|m4v|mpeg|mpg|m2ts|mts|mp3|aac|ogg|opus|wav)(\?|$)/i);
 
       if (Hls.isSupported() && !isDirectMedia) {
+        
         const hlsConfig: any = { 
-          maxMaxBufferLength: 30,
-          renderTextTracksNatively: false 
+          maxMaxBufferLength: 30 
         };
 
         if (useProxy) {
           const DefaultLoader: any = Hls.DefaultConfig.loader;
-          hlsConfig.loader = class ProxyLoader extends DefaultLoader {
+          const ProxyLoaderClass = class ProxyLoader extends DefaultLoader {
             constructor(config: any) {
               super(config);
               const originalLoad = this.load.bind(this);
+              
               this.load = (context: any, loadConfig: any, callbacks: any) => {
                 if (context.url && !context.url.startsWith(PROXY_WORKER_URL)) {
-                  const pConfig = { 
-                    url: context.url, 
-                    userAgent: proxyConfig.userAgent,
-                    referer: proxyConfig.referer,
-                    origin: proxyConfig.origin
-                  };
-                  const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(pConfig))));
-                  context.url = `${PROXY_WORKER_URL}?cfg=${encoded}`;
+                  const originalUrl = context.url;
+                  try {
+                    const pConfig = { 
+                      url: originalUrl, 
+                      userAgent: proxyConfigRef.current.userAgent,
+                      referer: proxyConfigRef.current.referer,
+                      origin: proxyConfigRef.current.origin
+                    };
+                    const bytes = new TextEncoder().encode(JSON.stringify(pConfig));
+                    context.url = `${PROXY_WORKER_URL}?cfg=${bytesToBase64(bytes)}`;
+                    
+                    const wrappedCallbacks = {
+                      ...callbacks,
+                      onSuccess: callbacks.onSuccess ? (...args: any[]) => {
+                        context.url = originalUrl;
+                        if (args[0] && typeof args[0] === 'object' && 'url' in args[0]) {
+                          args[0].url = originalUrl;
+                        }
+                        return callbacks.onSuccess(...args);
+                      } : undefined,
+                      onError: callbacks.onError ? (...args: any[]) => {
+                        context.url = originalUrl;
+                        return callbacks.onError(...args);
+                      } : undefined,
+                      onTimeout: callbacks.onTimeout ? (...args: any[]) => {
+                        context.url = originalUrl;
+                        return callbacks.onTimeout(...args);
+                      } : undefined,
+                      onAbort: callbacks.onAbort ? (...args: any[]) => {
+                        context.url = originalUrl;
+                        return callbacks.onAbort(...args);
+                      } : undefined
+                    };
+                    
+                    originalLoad(context, loadConfig, wrappedCallbacks);
+                    return;
+                  } catch (e) { 
+                    context.url = originalUrl; 
+                  }
                 }
                 originalLoad(context, loadConfig, callbacks);
               };
             }
           };
+
+          hlsConfig.loader = ProxyLoaderClass;
+          hlsConfig.pLoader = ProxyLoaderClass;
+          hlsConfig.fLoader = ProxyLoaderClass;
+          hlsConfig.audioLoader = ProxyLoaderClass;
+          hlsConfig.subtitleLoader = ProxyLoaderClass;
         }
 
         const hls = new Hls(hlsConfig);
         hlsRef.current = hls;
-
         hls.loadSource(activeStreamUrl);
         hls.attachMedia(video);
 
-        let initialAudioSet = false;
-
-        const processSubtitles = (tracks: any[]) => {
+        const processSubtitles = (tracks: MediaTrack[]) => {
+          if (!isMounted.current) return;
           setSubtitleTracks(tracks);
+          
           if (userTouchedSubtitles.current) return; 
-          if (tracks.length > 0) {
-            let targetIdx = -1;
-            if (settings.default_subtitle) {
-              targetIdx = tracks.findIndex(t => t.name?.toLowerCase().includes(settings.default_subtitle.toLowerCase()) || t.lang?.toLowerCase().includes(settings.default_subtitle.toLowerCase()));
+
+          let targetIdx = -1;
+          const defaultSub = settingsRef.current?.default_subtitle?.toLowerCase();
+          
+          if (defaultSub && defaultSub !== 'none' && defaultSub !== 'off') {
+            targetIdx = tracks.findIndex(t => t.name?.toLowerCase().includes(defaultSub) || t.lang?.toLowerCase().includes(defaultSub));
+          }
+          
+          if (hlsRef.current) hlsRef.current.subtitleTrack = targetIdx;
+          setCurrentSubtitleTrack(targetIdx);
+        };
+
+        const processAudio = (tracks: MediaTrack[]) => {
+          if (!isMounted.current) return;
+          setAudioTracks(tracks);
+          
+          if (userTouchedAudio.current) return;
+
+          let targetIdx = -1;
+          const defaultAudio = settingsRef.current?.default_audio?.toLowerCase();
+          
+          if (defaultAudio && defaultAudio !== 'none' && defaultAudio !== 'off') {
+            targetIdx = tracks.findIndex(t => t.name?.toLowerCase().includes(defaultAudio) || t.lang?.toLowerCase().includes(defaultAudio));
+          }
+
+          if (hlsRef.current) {
+            if (targetIdx !== -1) {
+              hlsRef.current.audioTrack = targetIdx;
+              setCurrentAudioTrack(targetIdx);
+            } else {
+              setCurrentAudioTrack(hlsRef.current.audioTrack);
             }
-            hls.subtitleTrack = targetIdx;
-            if (hls.subtitleDisplay !== undefined) hls.subtitleDisplay = targetIdx !== -1;
-            setCurrentSubtitleTrack(targetIdx);
           }
         };
 
         hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
           clearWatchdog();
+          
           setLevels(data.levels || []);
-          let targetLevel = -1; 
-          if (data.levels && data.levels.length > 0) {
-            if (settings.default_quality === 'high') targetLevel = data.levels.length - 1;
-            else if (settings.default_quality === 'low') targetLevel = 0;
-          }
-          if (targetLevel !== -1) {
-            hls.startLevel = targetLevel;
-            hls.nextLoadLevel = targetLevel;
-            hls.currentLevel = targetLevel; 
-          }
-          setCurrentLevel(targetLevel);
-
-          if (hls.audioTracks && hls.audioTracks.length > 0) {
-            setAudioTracks(hls.audioTracks);
-            if (settings.default_audio) {
-              const idx = hls.audioTracks.findIndex(t => t.name?.toLowerCase().includes(settings.default_audio.toLowerCase()) || t.lang?.toLowerCase().includes(settings.default_audio.toLowerCase()));
-              if (idx !== -1) {
-                hls.audioTrack = idx;
-                setCurrentAudioTrack(idx);
-                initialAudioSet = true;
+          let targetLevel = -1;
+          let isAuto = true;
+          const defaultQ = settingsRef.current?.default_quality?.toLowerCase();
+          
+          if (data.levels && data.levels.length > 0 && defaultQ) {
+            if (defaultQ === 'high') {
+              targetLevel = data.levels.length - 1; 
+              isAuto = false;
+            } else if (defaultQ === 'low') {
+              targetLevel = 0; 
+              isAuto = false;
+            } else if (defaultQ !== 'auto') {
+              const targetHeight = parseInt(defaultQ);
+              if (!isNaN(targetHeight)) {
+                let closestIdx = 0;
+                let minDiff = Infinity;
+                data.levels.forEach((l, idx) => {
+                  const diff = Math.abs((l.height || 0) - targetHeight);
+                  if (diff < minDiff) { minDiff = diff; closestIdx = idx; }
+                });
+                targetLevel = closestIdx;
+                isAuto = false;
               }
             }
-            if (!initialAudioSet) setCurrentAudioTrack(hls.audioTrack);
           }
-          if (hls.subtitleTracks && hls.subtitleTracks.length > 0) processSubtitles(hls.subtitleTracks);
+          
+          hls.currentLevel = targetLevel;
+          setIsAutoQuality(isAuto);
+          setManualQualityLevel(targetLevel);
+
+          if (hls.audioTracks) processAudio(hls.audioTracks);
+          if (hls.subtitleTracks) processSubtitles(hls.subtitleTracks);
           setIsBuffering(false);
         });
 
-        hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => setAutoLevel(data.level));
-        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event, data) => {
-          const tracks = data.audioTracks || [];
-          setAudioTracks(tracks);
-          if (settings.default_audio && !initialAudioSet && tracks.length > 0) {
-            const idx = tracks.findIndex((t: any) => t.name?.toLowerCase().includes(settings.default_audio.toLowerCase()) || t.lang?.toLowerCase().includes(settings.default_audio.toLowerCase()));
-            if (idx !== -1) {
-              hls.audioTrack = idx;
-              setCurrentAudioTrack(idx);
-              initialAudioSet = true;
-            }
-          }
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+          setAutoLevel(data.level);
         });
-        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event, data) => processSubtitles(data.subtitleTracks || []));
+        
+        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event, data) => {
+          processAudio(data.audioTracks || []);
+        });
+        
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_event, data) => {
+          processSubtitles(data.subtitleTracks || []);
+        });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return; 
-          const parsedError = getHlsError(data, useProxy);
-          if (parsedError) {
+          const parsedError = getHlsError(data); 
+          if (parsedError && isMounted.current) {
             clearWatchdog();
             setIsBuffering(false);
+            
+            if (useProxy && parsedError.title === "Network Error") {
+              if (parsedError.raw.includes("521") || parsedError.raw.includes("522")) {
+                 parsedError.title = "Proxy Blocked by Provider";
+                 parsedError.desc = "This provider actively blocks Cloudflare Proxies. You MUST click 'Play External (without Proxy)'.";
+              }
+            }
+
             setErrorUI(parsedError);
             setHasFatalError(true);
-            hls.destroy();
+            if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
           }
         });
       } 
@@ -347,17 +454,15 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         video.src = activeStreamUrl;
         video.load(); 
       }
+      isRetrying.current = false;
     };
 
     initializePlayer();
     startControlHideTimer();
 
     return () => {
-      isMounted = false;
       clearWatchdog();
       if (hlsRef.current) {
-        hlsRef.current.stopLoad(); 
-        hlsRef.current.detachMedia();
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
@@ -365,15 +470,23 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       video.removeEventListener('pause', handleNativePause);
       video.removeEventListener('waiting', handleNativeWaiting);
       video.removeEventListener('playing', handleNativePlaying);
+      video.removeEventListener('progress', handleNativeProgress);
+      video.removeEventListener('loadeddata', handleNativeLoadedData);
       video.removeEventListener('enterpictureinpicture', handleEnterPip);
       video.removeEventListener('leavepictureinpicture', handleLeavePip);
       video.removeEventListener('loadedmetadata', handleNativeMeta);
       video.removeEventListener('error', handleNativeError);
+      
       if (hideControlsTimeout.current) clearTimeout(hideControlsTimeout.current);
+      
+      if (document.pictureInPictureElement === video) {
+        document.exitPictureInPicture().catch(() => {});
+      }
+      video.pause();
       video.removeAttribute('src'); 
       video.load();
     };
-  }, [streamUrl, retryCount, settings, useProxy, computedProxyUrl]);
+  }, [streamUrl, retryCount, useProxy, computedProxyUrl]);
 
   const toggleMenu = (menu: 'quality' | 'audio' | 'subtitles') => {
     const nextMenu = activeMenu === menu ? null : menu;
@@ -382,29 +495,44 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   };
 
   const handleRetryNormal = () => {
-    resetUIState(); // FIX: Clear stale UI state on retry
+    if (isRetrying.current) return;
+    isRetrying.current = true;
+    resetUIState();
     setRetryCount(prev => prev + 1);
   };
 
   const handleRetryProxy = () => {
-    resetUIState(); // FIX: Clear stale UI state on proxy retry
+    if (isRetrying.current) return;
+    isRetrying.current = true;
+    resetUIState();
     setUseProxy(true);
     setRetryCount(prev => prev + 1);
   };
 
+  // FIX: Applied specific currentLevel assignment and UI state updates
   const changeQuality = (levelIndex: number) => {
-    if (hlsRef.current) {
+    if (!hlsRef.current) return;
+
+    if (levelIndex === -1) {
+      hlsRef.current.currentLevel = -1;
+      // hlsRef.current.nextLevel = -1;
+      // hlsRef.current.loadLevel = -1;
+    } else {
       hlsRef.current.currentLevel = levelIndex; 
-      setCurrentLevel(levelIndex);
-      setActiveMenu(null);
-      activeMenuRef.current = null;
     }
+    
+    setManualQualityLevel(levelIndex);
+    setIsAutoQuality(levelIndex === -1);
+    
+    setActiveMenu(null);
+    activeMenuRef.current = null;
   };
 
   const changeAudioTrack = (trackIndex: number) => {
     if (hlsRef.current) {
       hlsRef.current.audioTrack = trackIndex;
       setCurrentAudioTrack(trackIndex);
+      userTouchedAudio.current = true; 
       setActiveMenu(null);
       activeMenuRef.current = null;
     }
@@ -413,7 +541,6 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   const changeSubtitleTrack = (trackIndex: number) => {
     if (hlsRef.current) {
       hlsRef.current.subtitleTrack = trackIndex;
-      if (hlsRef.current.subtitleDisplay !== undefined) hlsRef.current.subtitleDisplay = trackIndex !== -1;
       setCurrentSubtitleTrack(trackIndex);
       userTouchedSubtitles.current = true;
       setActiveMenu(null);
@@ -446,6 +573,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation();
     const val = parseFloat(e.target.value);
     setVolume(val);
     try { localStorage.setItem('iptv_volume', val.toString()); } catch {}
@@ -453,6 +581,9 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       videoRef.current.volume = val;
       const willMute = val === 0;
       videoRef.current.muted = willMute;
+      if (!willMute) {
+        lastVolumeRef.current = val;
+      }
       if (!willMute && isMuted) { 
         setIsMuted(false); 
         try { localStorage.setItem('iptv_muted', 'false'); } catch {} 
@@ -470,8 +601,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
       setIsMuted(nextMuted);
       try { localStorage.setItem('iptv_muted', nextMuted.toString()); } catch {}
       if (!nextMuted) {
-        let restoredVolume = volume;
-        if (restoredVolume === 0) restoredVolume = 0.5;
+        const restoredVolume = lastVolumeRef.current > 0 ? lastVolumeRef.current : 0.5;
         setVolume(restoredVolume);
         videoRef.current.volume = restoredVolume;
         try { localStorage.setItem('iptv_volume', restoredVolume.toString()); } catch {}
@@ -483,18 +613,28 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     if (!videoRef.current) return;
     const duration = videoRef.current.duration;
     const currentTime = videoRef.current.currentTime;
+    
     if (duration && isFinite(duration)) {
       if (isLive) setIsLive(false);
-      setProgress((currentTime / duration) * 100);
-      setCurrentTimeDisplay(formatTime(currentTime));
-      setDurationDisplay(formatTime(duration));
+      const currentInt = Math.floor(currentTime);
+      if (currentInt !== lastTimeRef.current) {
+        lastTimeRef.current = currentInt;
+        setProgress((currentTime / duration) * 100);
+        setCurrentTimeDisplay(formatTime(currentTime));
+      }
+      
+      const durationInt = Math.floor(duration);
+      if (durationInt !== lastDurationRef.current) {
+         lastDurationRef.current = durationInt;
+         setDurationDisplay(formatTime(duration));
+      }
     } else {
       if (!isLive) setIsLive(true);
-      setProgress(100); 
     }
   };
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
     if (!videoRef.current) return;
     const duration = videoRef.current.duration;
     if (!duration || !isFinite(duration)) return; 
@@ -503,7 +643,8 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     videoRef.current.currentTime = percent * duration;
   };
 
-  const toggleFullScreen = async () => {
+  const toggleFullScreen = async (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (!document.fullscreenElement) {
       try {
         if (containerRef.current) {
@@ -516,11 +657,12 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
     }
   };
 
-  const togglePiP = async () => {
+  const togglePiP = async (e: React.MouseEvent) => {
+    e.stopPropagation();
     try {
       if (document.pictureInPictureElement) await document.exitPictureInPicture();
       else if (document.pictureInPictureEnabled && videoRef.current) await videoRef.current.requestPictureInPicture();
-    } catch (error) { console.warn("PiP Error:", error); }
+    } catch (error) { if (import.meta.env?.DEV) console.warn("PiP Error:", error); }
   };
 
   const launchExternalPlayer = (forceProxy: boolean = false) => {
@@ -539,7 +681,16 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
         }
       } else targetUrl = `vlc://${targetUrl}`;
       window.location.href = targetUrl;
-    } catch (error: any) { console.error("External Player Launch Error:", error); }
+    } catch (error: any) { if (import.meta.env?.DEV) console.error("External Player Launch Error:", error); }
+  };
+
+  // Helper to smartly determine what to call the quality level
+  const getLevelLabel = (level: Level | undefined, idx: number) => {
+    if (!level) return '';
+    if (level.height) return `${level.height}p`;
+    if (level.name) return level.name;
+    if (level.bitrate) return `${Math.round(level.bitrate / 1000)} kbps`;
+    return `Level ${idx + 1}`;
   };
 
   return (
@@ -592,15 +743,15 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
 
           <div className="flex items-center justify-between pointer-events-auto">
             <div className="flex items-center gap-4 sm:gap-6">
-              <button onClick={togglePlay} aria-label={isPlaying ? "Pause" : "Play"} className="text-white hover:text-blue-400 transition-colors">
+              <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} aria-label={isPlaying ? "Pause" : "Play"} className="text-white hover:text-blue-400 transition-colors">
                 {isPlaying ? <Pause size={24} className="fill-current" /> : <Play size={24} className="fill-current" />}
               </button>
               <div className="flex items-center gap-2 group/volume">
-                <button onClick={toggleMute} aria-label={isMuted ? "Unmute" : "Mute"} className="text-white hover:text-blue-400 transition-colors">
+                <button onClick={(e) => { e.stopPropagation(); toggleMute(); }} aria-label={isMuted ? "Unmute" : "Mute"} className="text-white hover:text-blue-400 transition-colors">
                   {isMuted || volume === 0 ? <VolumeX size={20} /> : <Volume2 size={20} />}
                 </button>
                 <input 
-                  type="range" min="0" max="1" step="0.05" value={isMuted ? 0 : volume} onChange={handleVolumeChange} aria-label="Volume"
+                  type="range" min="0" max="1" step="0.05" value={volume} onChange={handleVolumeChange} aria-label="Volume"
                   className="w-0 sm:w-20 opacity-0 sm:opacity-100 group-hover/volume:w-20 group-hover/volume:opacity-100 transition-all accent-blue-500 h-1 cursor-pointer"
                 />
               </div>
@@ -625,11 +776,11 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
                   {activeMenu === 'subtitles' && (
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Subtitles</span></div>
-                      <button onClick={() => changeSubtitleTrack(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
+                      <button onClick={(e) => { e.stopPropagation(); changeSubtitleTrack(-1); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
                         Off {currentSubtitleTrack === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
                       </button>
                       {subtitleTracks.map((track, idx) => (
-                        <button key={idx} onClick={() => changeSubtitleTrack(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between truncate">
+                        <button key={idx} onClick={(e) => { e.stopPropagation(); changeSubtitleTrack(idx); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between truncate">
                           {track.name || track.lang || `Track ${idx + 1}`} {currentSubtitleTrack === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
                         </button>
                       ))}
@@ -647,7 +798,7 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Audio Track</span></div>
                       {audioTracks.map((track, idx) => (
-                        <button key={idx} onClick={() => changeAudioTrack(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between truncate">
+                        <button key={idx} onClick={(e) => { e.stopPropagation(); changeAudioTrack(idx); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between truncate">
                           {track.name || track.lang || `Track ${idx + 1}`} {currentAudioTrack === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
                         </button>
                       ))}
@@ -664,21 +815,23 @@ export default function VideoEngine({ streamUrl }: VideoEngineProps) {
                   {activeMenu === 'quality' && (
                     <div className="absolute bottom-full right-0 mb-4 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-lg shadow-2xl py-2 min-w-[140px] z-50">
                       <div className="px-4 py-1.5 border-b border-slate-700 mb-1"><span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Quality</span></div>
-                      <button onClick={() => changeQuality(-1)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
-                        Auto {currentLevel === -1 && autoLevel !== -1 && levels[autoLevel]?.height ? `(${levels[autoLevel].height}p)` : ''} 
-                        {currentLevel === -1 && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
-                      </button>
-                      {levels.map((level, idx) => (
-                        <button key={idx} onClick={() => changeQuality(idx)} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
-                          {level.height ? `${level.height}p` : `Level ${idx + 1}`} {currentLevel === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
-                        </button>
+                      
+                      <button onClick={(e) => { e.stopPropagation(); changeQuality(-1); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
+  Auto {isAutoQuality && autoLevel !== -1 && levels[autoLevel] ? `(${getLevelLabel(levels[autoLevel], autoLevel)})` : ''} 
+  {isAutoQuality && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+</button>
+
+{levels.map((level, idx) => (
+  <button key={idx} onClick={(e) => { e.stopPropagation(); changeQuality(idx); }} className="w-full px-4 py-2 text-sm text-left text-white hover:bg-slate-800 flex items-center justify-between">
+    {getLevelLabel(level, idx)} {!isAutoQuality && manualQualityLevel === idx && <Check size={14} className="text-blue-400 shrink-0 ml-2" />}
+  </button>
+                      
                       ))}
                     </div>
                   )}
                 </div>
               )}
 
-              {/* FIX: Only render PiP button if the browser actually supports it */}
               {isPiPSupported && (
                 <button onClick={togglePiP} aria-label="Picture in Picture" className="text-white hover:text-blue-400 transition-colors">
                   <PictureInPicture size={20} />
