@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Star, Trash2, Plus, Globe, RefreshCw, Search, Pencil, Ghost } from 'lucide-react';
+import { Star, Trash2, Plus, Globe, RefreshCw, Search, Ghost } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
 
@@ -32,24 +32,6 @@ export default function Directory() {
     catch (err) { console.error(err); } finally { setIsChecking(false); }
   };
 
-  const editCategory = async (categoryId: number, oldName: string) => {
-    const newName = window.prompt("Enter new category name:", oldName);
-    if (!newName || newName === oldName) return;
-    setCategories(prev => prev.map(cat => cat.id === categoryId ? { ...cat, name: newName } : cat));
-    try {
-      await fetch(`${API_URL}/categories/${categoryId}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName })
-      });
-    } catch (err) { console.error(err); fetchDirectory(); }
-  };
-
-  const deleteCategory = async (categoryId: number, categoryName: string) => {
-    if (!window.confirm(`Delete "${categoryName}" and ALL its links?`)) return;
-    setCategories(prev => prev.filter(cat => cat.id !== categoryId));
-    try { await fetch(`${API_URL}/categories/${categoryId}`, { method: 'DELETE' }); } 
-    catch (err) { console.error(err); fetchDirectory(); }
-  };
-
   const toggleStar = async (categoryId: number, linkId: number) => {
     setCategories(prev => prev.map(cat => cat.id === categoryId ? { ...cat, links: cat.links.map(link => link.id === linkId ? { ...link, is_starred: !link.is_starred } : link) } : cat));
     try { await fetch(`${API_URL}/links/${linkId}/star`, { method: 'PUT' }); } 
@@ -67,7 +49,6 @@ export default function Directory() {
     return [...links].sort((a, b) => a.is_starred !== b.is_starred ? (a.is_starred ? -1 : 1) : a.title.localeCompare(b.title));
   };
 
-  // JS Search Filter now searches Tags as well!
   const filteredCategories = categories.map(cat => ({
     ...cat,
     links: cat.links.filter(link => 
@@ -113,15 +94,12 @@ export default function Directory() {
           <div className="space-y-5">
             {filteredCategories.map((category) => (
               <div key={category.id} className="bg-slate-950/40 rounded-lg border border-slate-800 p-4">
-                <div className="flex justify-between items-center border-b border-slate-800 pb-2 mb-3">
+                <div className="border-b border-slate-800 pb-2 mb-3">
                   <h2 className="text-lg font-bold text-slate-200">{category.name}</h2>
-                  <div className="flex items-center gap-1">
-                    <button onClick={() => editCategory(category.id, category.name)} className="p-1.5 rounded hover:bg-blue-900/30 text-slate-500 hover:text-blue-400 transition-colors" title="Edit Category Name"><Pencil size={14} /></button>
-                    <button onClick={() => deleteCategory(category.id, category.name)} className="p-1.5 rounded hover:bg-red-900/30 text-slate-500 hover:text-red-400 transition-colors" title="Delete Category"><Trash2 size={14} /></button>
-                  </div>
                 </div>
                 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 max-h-[220px] overflow-y-auto overflow-x-hidden pr-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb]:rounded-full">
+                {/* Changed layout classes: Removed pr-2, added p-1, and gap-3 for perfect centering */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 max-h-[220px] overflow-y-auto overflow-x-hidden p-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb]:rounded-full">
                   {sortLinks(category.links).map((link) => (
                     <div key={link.id} className="group flex flex-col justify-between bg-slate-900/80 border border-slate-700 hover:border-slate-500 rounded-md p-2.5 transition-all">
                       <div>
@@ -131,15 +109,15 @@ export default function Directory() {
                               {link.title}
                             </a>
                             
-                            {/* Ghost Button (Wayback Machine) Appears Only When Dead */}
                             {link.status === 'dead' && (
                               <a href={`https://web.archive.org/web/*/${link.url}`} target="_blank" rel="noreferrer" className="text-slate-400 hover:text-slate-200 transition-colors" title="Search Wayback Machine Archive">
                                 <Ghost size={14} />
                               </a>
                             )}
                             
+                            {/* Mirror UI: i+2 outputs numbers 2, 3, etc. Tooltip shows custom title. */}
                             {link.mirrors && link.mirrors.map((m, i) => (
-                              <a key={m.id} href={m.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[10px] font-bold bg-slate-800 border border-slate-600 text-purple-300 px-1.5 py-0.5 rounded hover:bg-slate-700 shrink-0 transition-colors" title={`Mirror: ${m.url}`}>
+                              <a key={m.id} href={m.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[10px] font-bold bg-slate-800 border border-slate-600 text-purple-300 px-1.5 py-0.5 rounded hover:bg-slate-700 shrink-0 transition-colors" title={`${m.title} (${m.url})`}>
                                 {i + 2} <span className={`w-1 h-1 rounded-full ${m.status === 'live' ? 'bg-green-500' : m.status === 'dead' ? 'bg-red-500' : 'bg-slate-500'}`}></span>
                               </a>
                             ))}
@@ -161,7 +139,6 @@ export default function Directory() {
                         
                         {link.description && <p className="text-xs text-slate-400 line-clamp-1 mt-1">{link.description}</p>}
                         
-                        {/* TAG BADGES RENDER HERE */}
                         {link.tags && link.tags.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-2">
                             {link.tags.map((tag, idx) => (

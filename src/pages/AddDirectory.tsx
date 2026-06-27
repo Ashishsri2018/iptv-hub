@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FolderPlus, Link as LinkIcon, ArrowLeft, Save, Copy, Pencil } from 'lucide-react';
+import { FolderPlus, Link as LinkIcon, ArrowLeft, Save, Copy, Pencil, Trash2 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
 
@@ -30,7 +30,6 @@ export default function AddDirectory() {
 
   useEffect(() => { fetchCategories(); }, []);
 
-  // Auto-populate edit form when a link is selected
   useEffect(() => {
     if (!editLinkId || !editCategoryId) {
       setEditFormData({ title: '', url: '', description: '', tags: '' });
@@ -80,14 +79,38 @@ export default function AddDirectory() {
     finally { setIsSubmittingCategory(false); }
   };
 
+  const editCategory = async (categoryId: number, oldName: string) => {
+    const newName = window.prompt("Enter new category name:", oldName);
+    if (!newName || newName === oldName) return;
+    try {
+      await fetch(`${API_URL}/categories/${categoryId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName })
+      });
+      fetchCategories();
+    } catch (err) { console.error(err); }
+  };
+
+  const deleteCategory = async (categoryId: number, categoryName: string) => {
+    if (!window.confirm(`Delete "${categoryName}" and ALL its links?`)) return;
+    try { 
+      await fetch(`${API_URL}/categories/${categoryId}`, { method: 'DELETE' }); 
+      fetchCategories();
+    } catch (err) { console.error(err); }
+  };
+
   const handleAddLink = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmittingLink(true);
     setMessage({ type: '', text: 'Checking connection and saving...' });
     try {
-      const payload = isMirrorMode 
-        ? { category_id: parseInt(linkData.category_id), title: "Mirror", url: linkData.url, parent_id: parseInt(linkData.parent_id), tags: "" }
-        : { category_id: parseInt(linkData.category_id), title: linkData.title, url: linkData.url, description: linkData.description, tags: linkData.tags };
+      const payload = {
+        category_id: parseInt(linkData.category_id),
+        title: linkData.title,
+        url: linkData.url,
+        description: isMirrorMode ? "" : linkData.description,
+        tags: isMirrorMode ? "" : linkData.tags,
+        parent_id: isMirrorMode ? parseInt(linkData.parent_id) : undefined
+      };
 
       const response = await fetch(`${API_URL}/links`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
@@ -126,14 +149,13 @@ export default function AddDirectory() {
 
   return (
     <div className="h-full overflow-y-auto p-4 md:p-8 pb-28 md:pb-8">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-5xl mx-auto">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div className="flex items-center gap-4">
             <button onClick={() => navigate('/directory')} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-slate-100 transition-colors"><ArrowLeft size={24} /></button>
             <h1 className="text-2xl font-bold text-slate-100">Manage Directory</h1>
           </div>
           
-          {/* Top Tab Navigation */}
           <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-800 w-fit">
             <button onClick={() => { setActiveTab('add'); setMessage({ type: '', text: '' }); }} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'add' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
               Add New
@@ -152,7 +174,7 @@ export default function AddDirectory() {
 
         <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
           
-          {/* LEFT COLUMN: Dynamically switches between ADD and EDIT */}
+          {/* LEFT COLUMN: ADD / EDIT LINKS */}
           <div className="md:col-span-3">
             {activeTab === 'add' ? (
               <div className="bg-slate-950/50 rounded-xl border border-slate-800 p-5">
@@ -186,17 +208,19 @@ export default function AddDirectory() {
                     </div>
                   )}
 
+                  {/* Title input is now always visible so you can name your Mirrors */}
+                  <div>
+                    <label className="block text-sm font-medium text-slate-400 mb-1">
+                      {isMirrorMode ? 'Mirror Name (e.g. Server 2, Backup)' : 'Website Title'}
+                    </label>
+                    <input type="text" required placeholder="e.g. FMHY" value={linkData.title} onChange={(e) => setLinkData({...linkData, title: e.target.value})} className={`w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 outline-none ${isMirrorMode ? 'focus:border-purple-500' : 'focus:border-blue-500'}`}/>
+                  </div>
+
                   {!isMirrorMode && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-400 mb-1">Website Title</label>
-                        <input type="text" required placeholder="e.g. FMHY" value={linkData.title} onChange={(e) => setLinkData({...linkData, title: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none"/>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-400 mb-1">Tags (Comma separated)</label>
-                        <input type="text" placeholder="e.g. Movies, VPN, Torrent" value={linkData.tags} onChange={(e) => setLinkData({...linkData, tags: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none"/>
-                      </div>
-                    </>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-400 mb-1">Tags (Comma separated)</label>
+                      <input type="text" placeholder="e.g. Movies, VPN, Torrent" value={linkData.tags} onChange={(e) => setLinkData({...linkData, tags: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none"/>
+                    </div>
                   )}
 
                   <div>
@@ -240,7 +264,7 @@ export default function AddDirectory() {
                           <optgroup key={link.id} label={link.title}>
                             <option value={link.id}>{link.title}</option>
                             {link.mirrors?.map(m => (
-                              <option key={m.id} value={m.id}>↳ Mirror: {m.url}</option>
+                              <option key={m.id} value={m.id}>↳ {m.title} ({m.url})</option>
                             ))}
                           </optgroup>
                         ))}
@@ -273,22 +297,35 @@ export default function AddDirectory() {
             )}
           </div>
 
-          {/* RIGHT COLUMN: Add Category (Always visible) */}
+          {/* RIGHT COLUMN: MANAGE CATEGORIES */}
           <div className="md:col-span-2 bg-slate-950/50 rounded-xl border border-slate-800 p-5 h-fit">
             <div className="flex items-center gap-3 mb-6 border-b border-slate-800 pb-4">
               <FolderPlus className="text-emerald-500" size={24} />
-              <h2 className="text-xl font-semibold text-slate-200">New Category</h2>
+              <h2 className="text-xl font-semibold text-slate-200">Manage Categories</h2>
             </div>
-            <form onSubmit={handleAddCategory} className="space-y-4">
+            
+            <form onSubmit={handleAddCategory} className="space-y-4 mb-6">
               <div>
-                <label className="block text-sm font-medium text-slate-400 mb-1">Category Name</label>
-                <input type="text" required value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-emerald-500 outline-none"/>
+                <input type="text" required placeholder="New Category Name..." value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-emerald-500 outline-none"/>
               </div>
               <button type="submit" disabled={isSubmittingCategory} className="w-full flex justify-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 disabled:opacity-50 text-white p-2.5 rounded-lg font-medium transition-colors">
-                <FolderPlus size={18} /> {isSubmittingCategory ? 'Creating...' : 'Create Category'}
+                <Plus size={18} /> {isSubmittingCategory ? 'Creating...' : 'Create'}
               </button>
             </form>
+
+            <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700">
+              {categories.map(cat => (
+                 <div key={cat.id} className="flex justify-between items-center bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
+                   <span className="text-sm text-slate-300 font-medium truncate pr-2">{cat.name}</span>
+                   <div className="flex gap-1 shrink-0">
+                     <button onClick={() => editCategory(cat.id, cat.name)} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-orange-400 transition-colors" title="Rename Category"><Pencil size={14} /></button>
+                     <button onClick={() => deleteCategory(cat.id, cat.name)} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-red-400 transition-colors" title="Delete Category"><Trash2 size={14} /></button>
+                   </div>
+                 </div>
+              ))}
+            </div>
           </div>
+
         </div>
       </div>
     </div>
