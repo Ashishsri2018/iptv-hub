@@ -196,7 +196,10 @@ export default function Channels() {
     if (reset) setErrorMessage(null); 
 
     try {
-      const url = new URL('/api/channels', window.location.origin);
+      // Safely construct the URL using your config's API_URL
+const baseUrl = API_URL || window.location.origin;
+const url = new URL('/api/channels', baseUrl);
+
       url.searchParams.append('limit', '100');
       url.searchParams.append('offset', engine.offset.toString());
       

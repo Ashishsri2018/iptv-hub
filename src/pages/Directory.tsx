@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Star, Plus, Globe, RefreshCw, Search, Ghost } from 'lucide-react';
 
-const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
+import { DIRECTORY_API as API_URL } from '../config';
 
 interface DirectoryLink {
   id: number; title: string; url: string; description: string;
