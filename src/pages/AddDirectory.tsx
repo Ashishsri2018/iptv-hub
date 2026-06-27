@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FolderPlus, Link as LinkIcon, ArrowLeft, Save, Copy, Pencil, Trash2 } from 'lucide-react';
+import { FolderPlus, Link as LinkIcon, ArrowLeft, Save, Copy, Pencil, Trash2, Plus } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
 
