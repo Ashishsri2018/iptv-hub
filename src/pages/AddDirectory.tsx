@@ -1,60 +1,70 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FolderPlus, Link as LinkIcon, ArrowLeft, Save, Copy, Pencil, Trash2, Plus } from 'lucide-react';
+import { ArrowLeft, Save, Plus, Trash2, Settings2 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
 
 interface DirectoryLink { id: number; title: string; url: string; description?: string; tags?: string[]; mirrors?: DirectoryLink[]; }
 interface Category { id: number; name: string; links: DirectoryLink[]; }
 
+type MainTab = 'add' | 'edit' | 'delete';
+type SubTab = 'site' | 'mirror' | 'category';
+
 export default function AddDirectory() {
   const navigate = useNavigate();
   const [categories, setCategories] = useState<Category[]>([]);
-  const [activeTab, setActiveTab] = useState<'add' | 'edit'>('add');
+  
+  const [mainTab, setMainTab] = useState<MainTab>('add');
+  const [subTab, setSubTab] = useState<SubTab>('site');
+  
   const [message, setMessage] = useState({ type: '', text: '' });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Category State
-  const [newCategoryName, setNewCategoryName] = useState('');
-  const [isSubmittingCategory, setIsSubmittingCategory] = useState(false);
-
-  // Add Link State
-  const [isMirrorMode, setIsMirrorMode] = useState(false);
-  const [linkData, setLinkData] = useState({ category_id: '', parent_id: '', title: '', url: '', description: '', tags: '' });
-  const [isSubmittingLink, setIsSubmittingLink] = useState(false);
-
-  // Edit Link State
-  const [editCategoryId, setEditCategoryId] = useState('');
-  const [editLinkId, setEditLinkId] = useState('');
-  const [editFormData, setEditFormData] = useState({ title: '', url: '', description: '', tags: '' });
-  const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+  const [form, setForm] = useState({
+    categoryId: '',
+    parentId: '',
+    linkId: '',
+    title: '',
+    url: '',
+    description: '',
+    tags: '',
+    categoryName: ''
+  });
 
   useEffect(() => { fetchCategories(); }, []);
 
+  // Auto-populate logic when Edit tab selections change
   useEffect(() => {
-    if (!editLinkId || !editCategoryId) {
-      setEditFormData({ title: '', url: '', description: '', tags: '' });
-      return;
+    if (mainTab !== 'edit') return;
+    
+    if (subTab === 'category' && form.categoryId) {
+      const cat = categories.find(c => c.id.toString() === form.categoryId);
+      if (cat) setForm(f => ({ ...f, categoryName: cat.name }));
     }
-    const cat = categories.find(c => c.id === parseInt(editCategoryId));
-    if (cat) {
-      let target: DirectoryLink | null = null;
-      for (const l of cat.links) {
-        if (l.id === parseInt(editLinkId)) target = l;
-        if (l.mirrors) {
-          const m = l.mirrors.find(mir => mir.id === parseInt(editLinkId));
-          if (m) target = m;
+    
+    if ((subTab === 'site' || subTab === 'mirror') && form.linkId && form.categoryId) {
+      const cat = categories.find(c => c.id.toString() === form.categoryId);
+      if (cat) {
+        let target: DirectoryLink | null = null;
+        for (const l of cat.links) {
+          if (l.id.toString() === form.linkId) target = l;
+          if (l.mirrors) {
+            const m = l.mirrors.find(mir => mir.id.toString() === form.linkId);
+            if (m) target = m;
+          }
+        }
+        if (target) {
+          setForm(f => ({
+            ...f,
+            title: target?.title || '',
+            url: target?.url || '',
+            description: target?.description || '',
+            tags: target?.tags ? target?.tags.join(', ') : ''
+          }));
         }
       }
-      if (target) {
-        setEditFormData({
-          title: target.title || '',
-          url: target.url || '',
-          description: target.description || '',
-          tags: target.tags ? target.tags.join(', ') : ''
-        });
-      }
     }
-  }, [editLinkId, editCategoryId, categories]);
+  }, [form.categoryId, form.linkId, mainTab, subTab, categories]);
 
   const fetchCategories = async () => {
     try {
@@ -63,107 +73,96 @@ export default function AddDirectory() {
     } catch (err) { console.error(err); }
   };
 
-  const handleAddCategory = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmittingCategory(true);
+  const resetForm = () => {
+    setForm({ categoryId: '', parentId: '', linkId: '', title: '', url: '', description: '', tags: '', categoryName: '' });
     setMessage({ type: '', text: '' });
-    try {
-      const response = await fetch(`${API_URL}/categories`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newCategoryName, sort_order: 0 })
-      });
-      if (!response.ok) throw new Error('Failed to add category');
-      setMessage({ type: 'success', text: 'Category created successfully!' });
-      setNewCategoryName('');
-      fetchCategories(); 
-    } catch (err: any) { setMessage({ type: 'error', text: err.message }); } 
-    finally { setIsSubmittingCategory(false); }
   };
 
-  const editCategory = async (categoryId: number, oldName: string) => {
-    const newName = window.prompt("Enter new category name:", oldName);
-    if (!newName || newName === oldName) return;
-    try {
-      await fetch(`${API_URL}/categories/${categoryId}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName })
-      });
-      fetchCategories();
-    } catch (err) { console.error(err); }
-  };
-
-  const deleteCategory = async (categoryId: number, categoryName: string) => {
-    if (!window.confirm(`Delete "${categoryName}" and ALL its links?`)) return;
-    try { 
-      await fetch(`${API_URL}/categories/${categoryId}`, { method: 'DELETE' }); 
-      fetchCategories();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleAddLink = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmittingLink(true);
-    setMessage({ type: '', text: 'Checking connection and saving...' });
-    try {
-      const payload = {
-        category_id: parseInt(linkData.category_id),
-        title: linkData.title,
-        url: linkData.url,
-        description: isMirrorMode ? "" : linkData.description,
-        tags: isMirrorMode ? "" : linkData.tags,
-        parent_id: isMirrorMode ? parseInt(linkData.parent_id) : undefined
-      };
+    setIsSubmitting(true);
+    setMessage({ type: '', text: 'Processing...' });
 
-      const response = await fetch(`${API_URL}/links`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-      });
-      if (!response.ok) throw new Error('Failed to add link');
-      setMessage({ type: 'success', text: isMirrorMode ? 'Mirror added successfully!' : 'Website added successfully!' });
-      setLinkData({ category_id: linkData.category_id, parent_id: linkData.parent_id, title: '', url: '', description: '', tags: '' });
-      fetchCategories();
-    } catch (err: any) { setMessage({ type: 'error', text: err.message }); } 
-    finally { setIsSubmittingLink(false); }
+    try {
+      // ----------- ADD LOGIC -----------
+      if (mainTab === 'add') {
+        if (subTab === 'category') {
+          const res = await fetch(`${API_URL}/categories`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: form.categoryName, sort_order: 0 }) });
+          if (!res.ok) throw new Error('Failed to create category');
+          setMessage({ type: 'success', text: 'Category created!' });
+        } else {
+          const payload = subTab === 'mirror' 
+            ? { category_id: parseInt(form.categoryId), title: form.title, url: form.url, parent_id: parseInt(form.parentId), tags: "" }
+            : { category_id: parseInt(form.categoryId), title: form.title, url: form.url, description: form.description, tags: form.tags };
+          const res = await fetch(`${API_URL}/links`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          if (!res.ok) throw new Error('Failed to create entry');
+          setMessage({ type: 'success', text: `${subTab === 'mirror' ? 'Mirror' : 'Website'} added successfully!` });
+        }
+      }
+      // ----------- EDIT LOGIC -----------
+      else if (mainTab === 'edit') {
+        if (subTab === 'category') {
+          const res = await fetch(`${API_URL}/categories/${form.categoryId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: form.categoryName }) });
+          if (!res.ok) throw new Error('Failed to update category');
+          setMessage({ type: 'success', text: 'Category updated!' });
+        } else {
+          const res = await fetch(`${API_URL}/links/${form.linkId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: form.title, url: form.url, description: form.description, tags: form.tags }) });
+          if (!res.ok) throw new Error('Failed to update entry');
+          setMessage({ type: 'success', text: 'Entry updated!' });
+        }
+      }
+      // ----------- DELETE LOGIC -----------
+      else if (mainTab === 'delete') {
+        if (subTab === 'category') {
+          if (!window.confirm("Are you sure? This deletes the category and ALL websites inside it.")) { setIsSubmitting(false); setMessage({type:'', text:''}); return; }
+          const res = await fetch(`${API_URL}/categories/${form.categoryId}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to delete category');
+          setMessage({ type: 'success', text: 'Category deleted!' });
+        } else {
+          const msg = subTab === 'mirror' ? "Are you sure you want to delete this mirror?" : "Are you sure? This deletes the website and its mirrors.";
+          if (!window.confirm(msg)) { setIsSubmitting(false); setMessage({type:'', text:''}); return; }
+          const res = await fetch(`${API_URL}/links/${form.linkId}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error('Failed to delete entry');
+          setMessage({ type: 'success', text: 'Entry deleted!' });
+        }
+      }
+      
+      if (mainTab !== 'edit') resetForm();
+      await fetchCategories();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleEditLink = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmittingEdit(true);
-    setMessage({ type: '', text: 'Saving changes...' });
-    try {
-      const response = await fetch(`${API_URL}/links/${editLinkId}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({
-          title: editFormData.title,
-          url: editFormData.url,
-          description: editFormData.description,
-          tags: editFormData.tags
-        })
-      });
-      if (!response.ok) throw new Error('Failed to update link');
-      setMessage({ type: 'success', text: 'Entry updated successfully!' });
-      fetchCategories();
-    } catch (err: any) { setMessage({ type: 'error', text: err.message }); } 
-    finally { setIsSubmittingEdit(false); }
-  };
-
-  const activeParentLinks = categories.find(c => c.id === parseInt(linkData.category_id))?.links || [];
-  const editCategoryLinks = categories.find(c => c.id === parseInt(editCategoryId))?.links || [];
+  const activeCatLinks = categories.find(c => c.id.toString() === form.categoryId)?.links || [];
+  const activeParentMirrors = activeCatLinks.find(l => l.id.toString() === form.parentId)?.mirrors || [];
 
   return (
     <div className="h-full overflow-y-auto p-4 md:p-8 pb-28 md:pb-8">
-      <div className="max-w-5xl mx-auto">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-          <div className="flex items-center gap-4">
-            <button onClick={() => navigate('/directory')} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-slate-100 transition-colors"><ArrowLeft size={24} /></button>
-            <h1 className="text-2xl font-bold text-slate-100">Manage Directory</h1>
-          </div>
-          
-          <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-800 w-fit">
-            <button onClick={() => { setActiveTab('add'); setMessage({ type: '', text: '' }); }} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'add' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
-              Add New
+      <div className="max-w-2xl mx-auto">
+        <div className="flex items-center gap-4 mb-6">
+          <button onClick={() => navigate('/directory')} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-slate-100 transition-colors"><ArrowLeft size={24} /></button>
+          <h1 className="text-2xl font-bold text-slate-100">Control Panel</h1>
+        </div>
+
+        {/* MAIN TABS */}
+        <div className="flex border-b border-slate-800 mb-6 bg-slate-950/50 rounded-t-lg">
+          {(['add', 'edit', 'delete'] as MainTab[]).map(tab => (
+            <button key={tab} onClick={() => { setMainTab(tab); resetForm(); }} className={`flex-1 py-3 font-semibold text-sm capitalize border-b-2 transition-colors ${mainTab === tab ? 'border-blue-500 text-blue-400 bg-slate-900/50' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>
+              {tab}
             </button>
-            <button onClick={() => { setActiveTab('edit'); setMessage({ type: '', text: '' }); }} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${activeTab === 'edit' ? 'bg-orange-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
-              Edit Existing
+          ))}
+        </div>
+
+        {/* SUB TABS */}
+        <div className="flex gap-2 mb-6">
+          {(['site', 'mirror', 'category'] as SubTab[]).map(tab => (
+            <button key={tab} onClick={() => { setSubTab(tab); resetForm(); }} className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${subTab === tab ? 'bg-slate-800 text-white' : 'bg-slate-950/50 border border-slate-800 text-slate-400 hover:text-slate-200'}`}>
+              {mainTab === 'add' ? `New ${tab}` : `${mainTab} ${tab}`}
             </button>
-          </div>
+          ))}
         </div>
 
         {message.text && (
@@ -172,160 +171,100 @@ export default function AddDirectory() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
-          
-          {/* LEFT COLUMN: ADD / EDIT LINKS */}
-          <div className="md:col-span-3">
-            {activeTab === 'add' ? (
-              <div className="bg-slate-950/50 rounded-xl border border-slate-800 p-5">
-                <div className="flex items-center justify-between mb-6 border-b border-slate-800 pb-4">
-                  <div className="flex items-center gap-3">
-                    {isMirrorMode ? <Copy className="text-purple-500" size={24} /> : <LinkIcon className="text-blue-500" size={24} />}
-                    <h2 className="text-xl font-semibold text-slate-200">{isMirrorMode ? 'Add Mirror Link' : 'Save a Website'}</h2>
-                  </div>
-                  <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-800">
-                    <button type="button" onClick={() => setIsMirrorMode(false)} className={`px-3 py-1 text-sm rounded-md transition-colors ${!isMirrorMode ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>New Site</button>
-                    <button type="button" onClick={() => setIsMirrorMode(true)} className={`px-3 py-1 text-sm rounded-md transition-colors ${isMirrorMode ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>Mirror</button>
-                  </div>
+        {/* UNIFIED FORM CONTAINER */}
+        <div className="bg-slate-950/50 rounded-xl border border-slate-800 p-6">
+          <div className="flex items-center gap-3 mb-6 border-b border-slate-800 pb-4">
+            <Settings2 className="text-blue-500" size={24} />
+            <h2 className="text-xl font-semibold text-slate-200 capitalize">{mainTab} {subTab}</h2>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            
+            {/* SELECTION ROW (Always needed except for Add Category) */}
+            {!(mainTab === 'add' && subTab === 'category') && (
+              <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-800 space-y-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Select Category</label>
+                  <select required value={form.categoryId} onChange={(e) => { setForm(f => ({...f, categoryId: e.target.value, parentId: '', linkId: ''})); }} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-slate-200 focus:border-blue-500 outline-none">
+                    <option value="" disabled>Choose category...</option>
+                    {categories.map(cat => <option key={cat.id} value={cat.id}>{cat.name}</option>)}
+                  </select>
                 </div>
 
-                <form onSubmit={handleAddLink} className="space-y-4">
+                {subTab === 'site' && mainTab !== 'add' && (
                   <div>
-                    <label className="block text-sm font-medium text-slate-400 mb-1">Category</label>
-                    <select required value={linkData.category_id} onChange={(e) => setLinkData({...linkData, category_id: e.target.value, parent_id: ''})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none">
-                      <option value="" disabled>Select a category...</option>
-                      {categories.map(cat => <option key={cat.id} value={cat.id}>{cat.name}</option>)}
+                    <label className="block text-xs font-medium text-slate-500 mb-1">Select Site</label>
+                    <select required value={form.linkId} onChange={(e) => setForm(f => ({...f, linkId: e.target.value}))} disabled={!form.categoryId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-slate-200 focus:border-blue-500 outline-none disabled:opacity-50">
+                      <option value="" disabled>Choose site...</option>
+                      {activeCatLinks.map(link => <option key={link.id} value={link.id}>{link.title}</option>)}
                     </select>
                   </div>
+                )}
 
-                  {isMirrorMode && (
+                {subTab === 'mirror' && (
+                  <>
                     <div>
-                      <label className="block text-sm font-medium text-slate-400 mb-1">Select Original Site</label>
-                      <select required value={linkData.parent_id} onChange={(e) => setLinkData({...linkData, parent_id: e.target.value})} disabled={!linkData.category_id} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-purple-500 outline-none disabled:opacity-50">
-                        <option value="" disabled>Select site to attach mirror to...</option>
-                        {activeParentLinks.map(link => <option key={link.id} value={link.id}>{link.title}</option>)}
+                      <label className="block text-xs font-medium text-slate-500 mb-1">Select Parent Site</label>
+                      <select required value={form.parentId} onChange={(e) => setForm(f => ({...f, parentId: e.target.value, linkId: ''}))} disabled={!form.categoryId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-slate-200 focus:border-blue-500 outline-none disabled:opacity-50">
+                        <option value="" disabled>Choose parent site...</option>
+                        {activeCatLinks.map(link => <option key={link.id} value={link.id}>{link.title}</option>)}
                       </select>
                     </div>
-                  )}
-
-                  {/* Title input is now always visible so you can name your Mirrors */}
-                  <div>
-                    <label className="block text-sm font-medium text-slate-400 mb-1">
-                      {isMirrorMode ? 'Mirror Name (e.g. Server 2, Backup)' : 'Website Title'}
-                    </label>
-                    <input type="text" required placeholder="e.g. FMHY" value={linkData.title} onChange={(e) => setLinkData({...linkData, title: e.target.value})} className={`w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 outline-none ${isMirrorMode ? 'focus:border-purple-500' : 'focus:border-blue-500'}`}/>
-                  </div>
-
-                  {!isMirrorMode && (
-                    <div>
-                      <label className="block text-sm font-medium text-slate-400 mb-1">Tags (Comma separated)</label>
-                      <input type="text" placeholder="e.g. Movies, VPN, Torrent" value={linkData.tags} onChange={(e) => setLinkData({...linkData, tags: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none"/>
-                    </div>
-                  )}
-
-                  <div>
-                    <label className="block text-sm font-medium text-slate-400 mb-1">URL (Must include https://)</label>
-                    <input type="url" required placeholder="https://..." value={linkData.url} onChange={(e) => setLinkData({...linkData, url: e.target.value})} className={`w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 outline-none ${isMirrorMode ? 'focus:border-purple-500' : 'focus:border-blue-500'}`}/>
-                  </div>
-
-                  {!isMirrorMode && (
-                    <div>
-                      <label className="block text-sm font-medium text-slate-400 mb-1">Description (Optional)</label>
-                      <textarea rows={2} value={linkData.description} onChange={(e) => setLinkData({...linkData, description: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none resize-none"/>
-                    </div>
-                  )}
-
-                  <button type="submit" disabled={isSubmittingLink || !linkData.category_id || (isMirrorMode && !linkData.parent_id)} className={`w-full flex items-center justify-center gap-2 disabled:bg-slate-700 text-white p-3 rounded-lg font-medium transition-colors mt-4 ${isMirrorMode ? 'bg-purple-600 hover:bg-purple-700' : 'bg-blue-600 hover:bg-blue-700'}`}>
-                    <Save size={20} /> {isSubmittingLink ? 'Verifying Link...' : isMirrorMode ? 'Save Mirror' : 'Save Website'}
-                  </button>
-                </form>
-              </div>
-            ) : (
-              <div className="bg-slate-950/50 rounded-xl border border-slate-800 p-5 border-t-4 border-t-orange-500">
-                <div className="flex items-center gap-3 mb-6 border-b border-slate-800 pb-4">
-                  <Pencil className="text-orange-500" size={24} />
-                  <h2 className="text-xl font-semibold text-slate-200">Edit Existing Entry</h2>
-                </div>
-
-                <form onSubmit={handleEditLink} className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-900/50 p-3 rounded-lg border border-slate-800">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1">1. Select Category</label>
-                      <select required value={editCategoryId} onChange={(e) => { setEditCategoryId(e.target.value); setEditLinkId(''); }} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-slate-200 focus:border-orange-500 outline-none">
-                        <option value="" disabled>Choose category...</option>
-                        {categories.map(cat => <option key={cat.id} value={cat.id}>{cat.name}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-500 mb-1">2. Select Link to Edit</label>
-                      <select required value={editLinkId} onChange={(e) => setEditLinkId(e.target.value)} disabled={!editCategoryId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-slate-200 focus:border-orange-500 outline-none disabled:opacity-50">
-                        <option value="" disabled>Choose site or mirror...</option>
-                        {editCategoryLinks.map(link => (
-                          <optgroup key={link.id} label={link.title}>
-                            <option value={link.id}>{link.title}</option>
-                            {link.mirrors?.map(m => (
-                              <option key={m.id} value={m.id}>↳ {m.title} ({m.url})</option>
-                            ))}
-                          </optgroup>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="pt-2">
-                    <label className="block text-sm font-medium text-slate-400 mb-1">Title</label>
-                    <input type="text" required value={editFormData.title} onChange={(e) => setEditFormData({...editFormData, title: e.target.value})} disabled={!editLinkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-orange-500 outline-none disabled:opacity-50"/>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-400 mb-1">URL</label>
-                    <input type="url" required value={editFormData.url} onChange={(e) => setEditFormData({...editFormData, url: e.target.value})} disabled={!editLinkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-orange-500 outline-none disabled:opacity-50"/>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-400 mb-1">Tags (Comma separated)</label>
-                    <input type="text" value={editFormData.tags} onChange={(e) => setEditFormData({...editFormData, tags: e.target.value})} disabled={!editLinkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-orange-500 outline-none disabled:opacity-50"/>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-400 mb-1">Description</label>
-                    <textarea rows={2} value={editFormData.description} onChange={(e) => setEditFormData({...editFormData, description: e.target.value})} disabled={!editLinkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-orange-500 outline-none resize-none disabled:opacity-50"/>
-                  </div>
-
-                  <button type="submit" disabled={isSubmittingEdit || !editLinkId} className="w-full flex items-center justify-center gap-2 bg-orange-600 hover:bg-orange-700 disabled:bg-slate-700 text-white p-3 rounded-lg font-medium transition-colors mt-4">
-                    <Save size={20} /> {isSubmittingEdit ? 'Saving Changes...' : 'Save Changes'}
-                  </button>
-                </form>
+                    {mainTab !== 'add' && (
+                      <div>
+                        <label className="block text-xs font-medium text-slate-500 mb-1">Select Mirror</label>
+                        <select required value={form.linkId} onChange={(e) => setForm(f => ({...f, linkId: e.target.value}))} disabled={!form.parentId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-slate-200 focus:border-blue-500 outline-none disabled:opacity-50">
+                          <option value="" disabled>Choose mirror...</option>
+                          {activeParentMirrors.map(m => <option key={m.id} value={m.id}>{m.title} ({m.url})</option>)}
+                        </select>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
-          </div>
 
-          {/* RIGHT COLUMN: MANAGE CATEGORIES */}
-          <div className="md:col-span-2 bg-slate-950/50 rounded-xl border border-slate-800 p-5 h-fit">
-            <div className="flex items-center gap-3 mb-6 border-b border-slate-800 pb-4">
-              <FolderPlus className="text-emerald-500" size={24} />
-              <h2 className="text-xl font-semibold text-slate-200">Manage Categories</h2>
-            </div>
-            
-            <form onSubmit={handleAddCategory} className="space-y-4 mb-6">
-              <div>
-                <input type="text" required placeholder="New Category Name..." value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-emerald-500 outline-none"/>
+            {/* INPUT FIELDS (Only show if Adding or Editing) */}
+            {mainTab !== 'delete' && (
+              <div className="space-y-4 pt-2">
+                {subTab === 'category' ? (
+                  <div>
+                    <label className="block text-sm font-medium text-slate-400 mb-1">Category Name</label>
+                    <input type="text" required value={form.categoryName} onChange={(e) => setForm(f => ({...f, categoryName: e.target.value}))} disabled={mainTab === 'edit' && !form.categoryId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none disabled:opacity-50"/>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-400 mb-1">{subTab === 'mirror' ? 'Mirror Name (e.g. Server 2)' : 'Title'}</label>
+                      <input type="text" required value={form.title} onChange={(e) => setForm(f => ({...f, title: e.target.value}))} disabled={mainTab === 'edit' && !form.linkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none disabled:opacity-50"/>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-400 mb-1">URL (Must include https://)</label>
+                      <input type="url" required value={form.url} onChange={(e) => setForm(f => ({...f, url: e.target.value}))} disabled={mainTab === 'edit' && !form.linkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none disabled:opacity-50"/>
+                    </div>
+                    
+                    {subTab === 'site' && (
+                      <>
+                        <div>
+                          <label className="block text-sm font-medium text-slate-400 mb-1">Tags (Comma separated)</label>
+                          <input type="text" value={form.tags} onChange={(e) => setForm(f => ({...f, tags: e.target.value}))} disabled={mainTab === 'edit' && !form.linkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none disabled:opacity-50"/>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-slate-400 mb-1">Description (Optional)</label>
+                          <textarea rows={2} value={form.description} onChange={(e) => setForm(f => ({...f, description: e.target.value}))} disabled={mainTab === 'edit' && !form.linkId} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none resize-none disabled:opacity-50"/>
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
               </div>
-              <button type="submit" disabled={isSubmittingCategory} className="w-full flex justify-center gap-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 disabled:opacity-50 text-white p-2.5 rounded-lg font-medium transition-colors">
-                <Plus size={18} /> {isSubmittingCategory ? 'Creating...' : 'Create'}
-              </button>
-            </form>
+            )}
 
-            <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700">
-              {categories.map(cat => (
-                 <div key={cat.id} className="flex justify-between items-center bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
-                   <span className="text-sm text-slate-300 font-medium truncate pr-2">{cat.name}</span>
-                   <div className="flex gap-1 shrink-0">
-                     <button onClick={() => editCategory(cat.id, cat.name)} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-orange-400 transition-colors" title="Rename Category"><Pencil size={14} /></button>
-                     <button onClick={() => deleteCategory(cat.id, cat.name)} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-red-400 transition-colors" title="Delete Category"><Trash2 size={14} /></button>
-                   </div>
-                 </div>
-              ))}
-            </div>
-          </div>
-
+            <button type="submit" disabled={isSubmitting || (mainTab === 'edit' && subTab === 'category' && !form.categoryId) || (mainTab === 'edit' && subTab !== 'category' && !form.linkId) || (mainTab === 'delete' && subTab === 'category' && !form.categoryId) || (mainTab === 'delete' && subTab !== 'category' && !form.linkId)} className={`w-full flex items-center justify-center gap-2 p-3 rounded-lg font-medium transition-colors mt-4 text-white ${mainTab === 'add' ? 'bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700' : mainTab === 'edit' ? 'bg-orange-600 hover:bg-orange-700 disabled:bg-slate-700' : 'bg-red-600 hover:bg-red-700 disabled:bg-slate-700'}`}>
+              {mainTab === 'add' ? <Plus size={20} /> : mainTab === 'edit' ? <Save size={20} /> : <Trash2 size={20} />}
+              {isSubmitting ? 'Processing...' : mainTab === 'add' ? `Save New ${subTab}` : mainTab === 'edit' ? `Save Changes` : `Delete ${subTab}`}
+            </button>
+          </form>
         </div>
       </div>
     </div>

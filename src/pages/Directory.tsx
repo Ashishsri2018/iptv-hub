@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Star, Trash2, Plus, Globe, RefreshCw, Search, Ghost } from 'lucide-react';
+import { Star, Plus, Globe, RefreshCw, Search, Ghost } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
 
@@ -38,13 +38,6 @@ export default function Directory() {
     catch (err) { fetchDirectory(); }
   };
 
-  const deleteLink = async (categoryId: number, linkId: number) => {
-    if (!window.confirm("Delete this site?")) return;
-    setCategories(prev => prev.map(cat => cat.id === categoryId ? { ...cat, links: cat.links.filter(link => link.id !== linkId) } : cat));
-    try { await fetch(`${API_URL}/links/${linkId}`, { method: 'DELETE' }); } 
-    catch (err) { fetchDirectory(); }
-  };
-
   const sortLinks = (links: DirectoryLink[]) => {
     return [...links].sort((a, b) => a.is_starred !== b.is_starred ? (a.is_starred ? -1 : 1) : a.title.localeCompare(b.title));
   };
@@ -75,7 +68,7 @@ export default function Directory() {
               <span className="hidden sm:inline">{isChecking ? 'Checking...' : 'Check Status'}</span>
             </button>
             <Link to="/directory/add" className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
-              <Plus size={16} /> <span className="hidden sm:inline">Add</span>
+              <Plus size={16} /> <span className="hidden sm:inline">Manage</span>
             </Link>
           </div>
         </div>
@@ -98,41 +91,38 @@ export default function Directory() {
                   <h2 className="text-lg font-bold text-slate-200">{category.name}</h2>
                 </div>
                 
-                {/* Changed layout classes: Removed pr-2, added p-1, and gap-3 for perfect centering */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 max-h-[220px] overflow-y-auto overflow-x-hidden p-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb]:rounded-full">
                   {sortLinks(category.links).map((link) => (
                     <div key={link.id} className="group flex flex-col justify-between bg-slate-900/80 border border-slate-700 hover:border-slate-500 rounded-md p-2.5 transition-all">
                       <div>
                         <div className="relative mb-1">
-                          <div className="flex flex-wrap items-center gap-1.5 pr-14 overflow-hidden">
-                            <a href={link.url} target="_blank" rel="noreferrer" className={`text-sm font-semibold truncate max-w-full ${link.status === 'dead' ? 'text-slate-400 line-through' : 'text-blue-400 hover:text-blue-300'}`}>
+                          
+                          {/* INLINE MIRROR UI */}
+                          <div className="flex flex-wrap items-baseline gap-0.5 pr-8 overflow-hidden">
+                            <a href={link.url} target="_blank" rel="noreferrer" className={`text-sm font-semibold truncate ${link.status === 'dead' ? 'text-slate-400 line-through' : 'text-blue-400 hover:text-blue-300'}`}>
                               {link.title}
                             </a>
                             
+                            {link.mirrors && link.mirrors.map((m, i) => (
+                              <span key={m.id} className="text-sm font-semibold text-slate-400">
+                                , <a href={m.url} target="_blank" rel="noreferrer" title={m.title} className={`${m.status === 'dead' ? 'text-slate-500 line-through' : 'text-purple-400 hover:text-purple-300'}`}>{i + 2}</a>
+                              </span>
+                            ))}
+
                             {link.status === 'dead' && (
-                              <a href={`https://web.archive.org/web/*/${link.url}`} target="_blank" rel="noreferrer" className="text-slate-400 hover:text-slate-200 transition-colors" title="Search Wayback Machine Archive">
-                                <Ghost size={14} />
+                              <a href={`https://web.archive.org/web/*/${link.url}`} target="_blank" rel="noreferrer" className="ml-1 text-slate-400 hover:text-slate-200 transition-colors" title="Search Wayback Machine Archive">
+                                <Ghost size={12} />
                               </a>
                             )}
                             
-                            {/* Mirror UI: i+2 outputs numbers 2, 3, etc. Tooltip shows custom title. */}
-                            {link.mirrors && link.mirrors.map((m, i) => (
-                              <a key={m.id} href={m.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[10px] font-bold bg-slate-800 border border-slate-600 text-purple-300 px-1.5 py-0.5 rounded hover:bg-slate-700 shrink-0 transition-colors" title={`${m.title} (${m.url})`}>
-                                {i + 2} <span className={`w-1 h-1 rounded-full ${m.status === 'live' ? 'bg-green-500' : m.status === 'dead' ? 'bg-red-500' : 'bg-slate-500'}`}></span>
-                              </a>
-                            ))}
-                            
-                            <span className="text-[10px] text-slate-500 truncate max-w-full leading-none">
+                            <span className="text-[10px] text-slate-500 ml-1 truncate">
                               ({link.url.replace(/^https?:\/\//, '')})
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-0.5 absolute right-0 top-0 bg-slate-900/90 pl-1 rounded-bl">
+                          <div className="flex items-center absolute right-0 top-0 bg-slate-900/90 pl-1 rounded-bl">
                             <button onClick={() => toggleStar(category.id, link.id)} className="p-1 rounded hover:bg-slate-800 transition-colors">
                               <Star size={14} className={link.is_starred ? "fill-yellow-500 text-yellow-500" : "text-slate-500"} />
-                            </button>
-                            <button onClick={() => deleteLink(category.id, link.id)} className="p-1 rounded hover:bg-red-900/30 text-slate-500 hover:text-red-400 transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100">
-                              <Trash2 size={14} />
                             </button>
                           </div>
                         </div>
