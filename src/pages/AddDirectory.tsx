@@ -15,7 +15,7 @@ export default function AddDirectory() {
   const [isSubmittingCategory, setIsSubmittingCategory] = useState(false);
 
   const [isMirrorMode, setIsMirrorMode] = useState(false);
-  const [linkData, setLinkData] = useState({ category_id: '', parent_id: '', title: '', url: '', description: '' });
+  const [linkData, setLinkData] = useState({ category_id: '', parent_id: '', title: '', url: '', description: '', tags: '' });
   const [isSubmittingLink, setIsSubmittingLink] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
 
@@ -25,7 +25,7 @@ export default function AddDirectory() {
     try {
       const response = await fetch(`${API_URL}/directory`);
       if (response.ok) setCategories(await response.json());
-    } catch (err) { console.error("Failed to load categories", err); }
+    } catch (err) { console.error(err); }
   };
 
   const handleAddCategory = async (e: React.FormEvent) => {
@@ -34,8 +34,7 @@ export default function AddDirectory() {
     setMessage({ type: '', text: '' });
     try {
       const response = await fetch(`${API_URL}/categories`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newCategoryName, sort_order: 0 })
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newCategoryName, sort_order: 0 })
       });
       if (!response.ok) throw new Error('Failed to add category');
       setMessage({ type: 'success', text: 'Category created successfully!' });
@@ -51,16 +50,15 @@ export default function AddDirectory() {
     setMessage({ type: '', text: 'Checking connection and saving...' });
     try {
       const payload = isMirrorMode 
-        ? { category_id: parseInt(linkData.category_id), title: "Mirror", url: linkData.url, parent_id: parseInt(linkData.parent_id) }
-        : { category_id: parseInt(linkData.category_id), title: linkData.title, url: linkData.url, description: linkData.description };
+        ? { category_id: parseInt(linkData.category_id), title: "Mirror", url: linkData.url, parent_id: parseInt(linkData.parent_id), tags: "" }
+        : { category_id: parseInt(linkData.category_id), title: linkData.title, url: linkData.url, description: linkData.description, tags: linkData.tags };
 
       const response = await fetch(`${API_URL}/links`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
       });
       if (!response.ok) throw new Error('Failed to add link');
       setMessage({ type: 'success', text: isMirrorMode ? 'Mirror added successfully!' : 'Website added successfully!' });
-      setLinkData({ category_id: linkData.category_id, parent_id: linkData.parent_id, title: '', url: '', description: '' });
+      setLinkData({ category_id: linkData.category_id, parent_id: linkData.parent_id, title: '', url: '', description: '', tags: '' });
       fetchCategories();
     } catch (err: any) { setMessage({ type: 'error', text: err.message }); } 
     finally { setIsSubmittingLink(false); }
@@ -115,10 +113,16 @@ export default function AddDirectory() {
               )}
 
               {!isMirrorMode && (
-                <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Website Title</label>
-                  <input type="text" required placeholder="e.g. FMHY" value={linkData.title} onChange={(e) => setLinkData({...linkData, title: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none"/>
-                </div>
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-400 mb-1">Website Title</label>
+                    <input type="text" required placeholder="e.g. FMHY" value={linkData.title} onChange={(e) => setLinkData({...linkData, title: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none"/>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-400 mb-1">Tags (Comma separated)</label>
+                    <input type="text" placeholder="e.g. Movies, VPN, Torrent" value={linkData.tags} onChange={(e) => setLinkData({...linkData, tags: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:border-blue-500 outline-none"/>
+                  </div>
+                </>
               )}
 
               <div>

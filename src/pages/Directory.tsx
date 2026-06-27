@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Star, Trash2, Plus, Globe, RefreshCw, Search, Pencil } from 'lucide-react';
+import { Star, Trash2, Plus, Globe, RefreshCw, Search, Pencil, Ghost } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_DIRECTORY_URL;
 
 interface DirectoryLink {
   id: number; title: string; url: string; description: string;
-  is_starred: boolean; status: string; mirrors?: DirectoryLink[];
+  is_starred: boolean; status: string; tags: string[]; mirrors?: DirectoryLink[];
 }
 interface Category { id: number; name: string; links: DirectoryLink[]; }
 
@@ -67,13 +67,14 @@ export default function Directory() {
     return [...links].sort((a, b) => a.is_starred !== b.is_starred ? (a.is_starred ? -1 : 1) : a.title.localeCompare(b.title));
   };
 
-  // JS Search Filter
+  // JS Search Filter now searches Tags as well!
   const filteredCategories = categories.map(cat => ({
     ...cat,
     links: cat.links.filter(link => 
       link.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
       link.url.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (link.description && link.description.toLowerCase().includes(searchTerm.toLowerCase()))
+      (link.description && link.description.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (link.tags && link.tags.some(tag => tag.toLowerCase().includes(searchTerm.toLowerCase())))
     )
   })).filter(cat => cat.links.length > 0 || cat.name.toLowerCase().includes(searchTerm.toLowerCase()));
 
@@ -100,7 +101,7 @@ export default function Directory() {
 
         <div className="mb-6 relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
-          <input type="text" placeholder="Search websites, URLs, or categories..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-slate-900/80 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-slate-200 focus:outline-none focus:border-blue-500 text-sm"/>
+          <input type="text" placeholder="Search websites, URLs, tags, or categories..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full bg-slate-900/80 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-slate-200 focus:outline-none focus:border-blue-500 text-sm"/>
         </div>
 
         {filteredCategories.length === 0 ? (
@@ -120,19 +121,23 @@ export default function Directory() {
                   </div>
                 </div>
                 
-                {/* Scrollable Container with Custom Webkit scrollbar CSS injected via Tailwind brackets */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2.5 max-h-[220px] overflow-y-auto overflow-x-hidden pr-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb]:rounded-full">
                   {sortLinks(category.links).map((link) => (
                     <div key={link.id} className="group flex flex-col justify-between bg-slate-900/80 border border-slate-700 hover:border-slate-500 rounded-md p-2.5 transition-all">
                       <div>
-                        {/* Inline Layout with Absolute action buttons */}
                         <div className="relative mb-1">
                           <div className="flex flex-wrap items-center gap-1.5 pr-14 overflow-hidden">
-                            <a href={link.url} target="_blank" rel="noreferrer" className="text-sm font-semibold text-blue-400 hover:text-blue-300 truncate max-w-full">
+                            <a href={link.url} target="_blank" rel="noreferrer" className={`text-sm font-semibold truncate max-w-full ${link.status === 'dead' ? 'text-slate-400 line-through' : 'text-blue-400 hover:text-blue-300'}`}>
                               {link.title}
                             </a>
                             
-                            {/* Mirror Badges */}
+                            {/* Ghost Button (Wayback Machine) Appears Only When Dead */}
+                            {link.status === 'dead' && (
+                              <a href={`https://web.archive.org/web/*/${link.url}`} target="_blank" rel="noreferrer" className="text-slate-400 hover:text-slate-200 transition-colors" title="Search Wayback Machine Archive">
+                                <Ghost size={14} />
+                              </a>
+                            )}
+                            
                             {link.mirrors && link.mirrors.map((m, i) => (
                               <a key={m.id} href={m.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[10px] font-bold bg-slate-800 border border-slate-600 text-purple-300 px-1.5 py-0.5 rounded hover:bg-slate-700 shrink-0 transition-colors" title={`Mirror: ${m.url}`}>
                                 {i + 2} <span className={`w-1 h-1 rounded-full ${m.status === 'live' ? 'bg-green-500' : m.status === 'dead' ? 'bg-red-500' : 'bg-slate-500'}`}></span>
@@ -144,7 +149,6 @@ export default function Directory() {
                             </span>
                           </div>
 
-                          {/* Top Right Action Buttons */}
                           <div className="flex items-center gap-0.5 absolute right-0 top-0 bg-slate-900/90 pl-1 rounded-bl">
                             <button onClick={() => toggleStar(category.id, link.id)} className="p-1 rounded hover:bg-slate-800 transition-colors">
                               <Star size={14} className={link.is_starred ? "fill-yellow-500 text-yellow-500" : "text-slate-500"} />
@@ -156,6 +160,17 @@ export default function Directory() {
                         </div>
                         
                         {link.description && <p className="text-xs text-slate-400 line-clamp-1 mt-1">{link.description}</p>}
+                        
+                        {/* TAG BADGES RENDER HERE */}
+                        {link.tags && link.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-2">
+                            {link.tags.map((tag, idx) => (
+                              <span key={idx} className="text-[9px] font-medium bg-slate-800/50 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded">
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       <div className="mt-2 flex items-center gap-1.5 text-[10px]">
